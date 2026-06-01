@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servicios Maracaibo - Portal Oficial</title>
+  <style>
+    :root {
+      --primary: #00f2fe;
+      --bg: #090d16;
+      --surface: #111827;
+      --text: #f3f4f6;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+    }
+    header {
+      background: linear-gradient(90deg, #0f172a 0%, #1e293b 100%);
+      padding: 20px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid #00f2fe;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.6rem;
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    nav a {
+      color: #94a3b8;
+      text-decoration: none;
+      margin-left: 20px;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    nav a:hover {
+      color: #00f2fe;
+    }
+    .hero {
+      text-align: center;
+      padding: 80px 20px;
+      background: radial-gradient(circle at top, rgba(0, 242, 254, 0.1) 0%, transparent 60%);
+    }
+    .hero h2 {
+      font-size: 2.8rem;
+      margin-bottom: 16px;
+    }
+    .hero p {
+      color: #94a3b8;
+      font-size: 1.2rem;
+      max-width: 600px;
+      margin: 0 auto 32px auto;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 40px 60px 40px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 24px;
+      transition: transform 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(0, 242, 254, 0.3);
+    }
+    .card h3 {
+      margin-top: 0;
+      color: #00f2fe;
+    }
+    .card p {
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Servicios Maracaibo</h1>
+    <nav>
+      <a href="#">Inicio</a>
+      <a href="#">Trámites</a>
+      <a href="#">Impuestos</a>
+      <a href="#">Contacto</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h2>Portal del Ciudadano</h2>
+    <p>Realiza tus solicitudes de aseo urbano, alumbrado público y licencias comerciales de manera fácil y rápida.</p>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h3>Atención Ciudadana</h3>
+      <p>Reporta fallas en servicios comunitarios o consulta el estado de tus solicitudes con tu número de cédula o RIF.</p>
+    </div>
+    <div class="card">
+      <h3>Catastro Municipal</h3>
+      <p>Inicia el registro o actualización de propiedades, planos residenciales y solvencias territoriales.</p>
+    </div>
+    <div class="card">
+      <h3>Licencias y Patentes</h3>
+      <p>Solicita o renueva licencias de actividades económicas para tu negocio o industria local.</p>
+    </div>
+  </section>
+
+  <!-- Widget: data-server-url usa la IP/host desde donde abres esta página -->
+  <script 
+    src="/widget.js" 
+    data-api-key="maracaibo_secret_key_2026" 
+    data-customer-name="Juan Pérez (Maracaibo)"
+    data-customer-id="user_test_001"
+    data-ticket-id="TEST-001"
+    data-server-url="">
+  </script>
+  <script>
+    (function () {
+      var s = document.querySelector('script[data-api-key]');
+      if (s && !s.getAttribute('data-server-url')) {
+        s.setAttribute('data-server-url', window.location.origin);
+      }
+    })();
+  </script>
+
+</body>
+</html>

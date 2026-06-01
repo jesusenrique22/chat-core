@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Tickets - Soporte Corporativo</title>
+  <style>
+    :root {
+      --primary: #8b5cf6;
+      --bg: #0b0f19;
+      --surface: #1e1b4b;
+      --text: #f3f4f6;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+    }
+    header {
+      background: #111827;
+      padding: 20px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 2px solid var(--primary);
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.6rem;
+      background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .badge {
+      background: rgba(139, 92, 246, 0.2);
+      color: #a78bfa;
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    main {
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+    .panel {
+      background: #111827;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 30px;
+    }
+    .panel h2 {
+      margin-top: 0;
+      font-size: 1.8rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 24px;
+      text-align: left;
+    }
+    th, td {
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    th {
+      color: #94a3b8;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .status {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .status.open {
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+    }
+    .status.pending {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Helpdesk Tickets</h1>
+    <span class="badge">Área de Clientes</span>
+  </header>
+
+  <main>
+    <div class="panel">
+      <h2>Mis Casos de Soporte Activos</h2>
+      <p style="color: #94a3b8; margin-bottom: 0;">Consulta y haz seguimiento a tus solicitudes y tickets de soporte técnico e infraestructura corporativa.</p>
+      
+      <table>
+        <thead>
+          <tr>
+            <th>ID Ticket</th>
+            <th>Asunto</th>
+            <th>Fecha Creación</th>
+            <th>Prioridad</th>
+            <th>Estado</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>#TK-8041</td>
+            <td>Falla de conexión en VPN corporativa</td>
+            <td>2026-05-19</td>
+            <td style="color: #ef4444; font-weight: 600;">Alta</td>
+            <td><span class="status open">Abierto</span></td>
+          </tr>
+          <tr>
+            <td>#TK-7922</td>
+            <td>Configuración de nuevo buzón Exchange</td>
+            <td>2026-05-18</td>
+            <td style="color: #94a3b8;">Baja</td>
+            <td><span class="status pending">En espera</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- Inyección del Widget de Chat para "Sistema de Tickets" -->
+  <script 
+    src="/widget.js" 
+    data-api-key="tickets_secret_key_2026" 
+    data-customer-name="María Gómez (Tickets)">
+  </script>
+
+</body>
+</html>

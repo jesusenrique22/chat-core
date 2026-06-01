@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Servicios Maracaibo - Web Externa Independiente</title>
+  <style>
+    :root {
+      --bg: #030712;
+      --surface: #0b0f19;
+      --primary: #00f2fe;
+      --text: #f3f4f6;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      text-align: center;
+      padding: 20px;
+    }
+    .card {
+      background-color: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
+      padding: 40px;
+      max-width: 600px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 2.2rem;
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 1.1rem;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    .badge {
+      display: inline-block;
+      background-color: rgba(0, 242, 254, 0.1);
+      color: #00f2fe;
+      border: 1px solid rgba(0, 242, 254, 0.3);
+      padding: 6px 16px;
+      border-radius: 30px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 20px;
+    }
+    .steps {
+      text-align: left;
+      background-color: rgba(255, 255, 255, 0.02);
+      border-radius: 12px;
+      padding: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .steps h3 {
+      margin-top: 0;
+      color: #ffffff;
+      font-size: 1rem;
+    }
+    .steps ul {
+      margin: 0;
+      padding-left: 20px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+    code {
+      color: #00f2fe;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <div class="badge">Simulación de Proyecto Externo</div>
+    <h1>Servicios Maracaibo - Sitio Web Oficial</h1>
+    <p>Este archivo simula la web del compañero en <strong>otro puerto</strong>, cargando el widget desde tu conector en la red local (sin VPN).</p>
+    
+    <div class="steps">
+      <h3>Uso</h3>
+      <ul>
+        <li>Levanta el conector: <code>npm run backend</code> (puerto 4000).</li>
+        <li>Sirve esta carpeta: <code>npx serve demo-cliente-externo -p 8181</code></li>
+        <li>Abre con la IP de quien hostea el chat, ej:<br>
+          <code id="example-url">http://localhost:8181?server=192.168.1.50</code></li>
+        <li><code>server</code> = IP LAN de la máquina donde corre el backend.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var serverHost = params.get("server") || "localhost";
+      var base = "http://" + serverHost + ":4000";
+      var el = document.getElementById("example-url");
+      if (el) el.textContent = location.origin + location.pathname + "?server=" + serverHost;
+
+      var s = document.createElement("script");
+      s.src = base + "/widget.js";
+      s.setAttribute("data-api-key", "maracaibo_secret_key_2026");
+      s.setAttribute("data-customer-name", "Cliente de Maracaibo (Proyecto Externo)");
+      s.setAttribute("data-server-url", base);
+      document.body.appendChild(s);
+    })();
+  </script>
+
+</body>
+</html>
