@@ -233,19 +233,18 @@ async function getTicketHistory(ticketId, query = {}) {
  * No arroja excepciones para evitar romper el flujo principal del chat si el servidor de notificaciones falla.
  */
 async function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
-  const url = process.env.NOTIFICATIONS_API_URL || 'https://vf89cz2t-8080.use.devtunnels.ms/notifications/ticket';
+  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
+  const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
   
   const messageText = customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`;
   console.log(`[Notificación] Enviando POST a ${url} para Ticket: ${ticketId}, Tipo: ${type}, Mensaje: "${messageText}"`);
 
   try {
+    // Payload exacto que espera el Sistema de Tickets
     const payload = { 
       ticketId, 
       type,
-      message: messageText,
-      text: messageText,
-      description: messageText,
-      body: messageText
+      message: messageText
     };
     if (status) {
       payload.status = status;
@@ -254,7 +253,8 @@ async function sendExternalNotification(ticketId, type = 'mensaje', status = nul
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey
       },
       body: JSON.stringify(payload)
     });
@@ -264,7 +264,7 @@ async function sendExternalNotification(ticketId, type = 'mensaje', status = nul
       console.warn(`[Notificación] Servidor externo respondió con código ${response.status}: ${errorText}`);
     } else {
       const data = await response.json().catch(() => ({}));
-      console.log(`[Notificación] Notificación enviada con éxito para Ticket ${ticketId}:`, data.message || 'ok');
+      console.log(`[Notificación] Notificación enviada con éxito para Ticket ${ticketId}:`, data.success ? 'ok' : JSON.stringify(data));
     }
   } catch (error) {
     console.error(`[Notificación] Error de conexión al notificar Ticket ${ticketId}:`, error.message);
