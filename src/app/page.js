@@ -7,6 +7,9 @@ import styles from "./page.module.css";
 // Determinar dinámicamente la URL del backend central (puerto 4000)
 // Usa el mismo hostname del navegador para funcionar tanto en localhost como VPN
 function getBackendUrl() {
+  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
+    return process.env.NEXT_PUBLIC_BACKEND_URL;
+  }
   if (typeof window === 'undefined') return 'http://localhost:4000';
   return `http://${window.location.hostname}:4000`;
 }
