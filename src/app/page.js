@@ -22,6 +22,7 @@ export default function AgentDashboard() {
   const [isConnected, setIsConnected] = useState(false);
   const [typingInChat, setTypingInChat] = useState(null);
   const [typingInSidebar, setTypingInSidebar] = useState({});
+  const [clientPresence, setClientPresence] = useState({}); // { [conversationId]: true|false }
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const selectedConvRef = useRef(null);
@@ -70,6 +71,10 @@ export default function AgentDashboard() {
 
     // Escucha actualizaciones globales de conversaciones
     socket.on("conversation_updated", (updatedConv) => {
+      // Actualizar también la presencia del cliente si viene en la conversación
+      if (updatedConv && typeof updatedConv.isOnline !== 'undefined') {
+        setClientPresence((prev) => ({ ...prev, [updatedConv._id]: updatedConv.isOnline }));
+      }
       setConversations((prev) => {
         // Si la conversación fue cerrada, la removemos del listado activo
         if (updatedConv.status === "closed") {
@@ -145,6 +150,14 @@ export default function AgentDashboard() {
       });
     });
 
+    // Presencia del cliente: actualiza el chat abierto y el sidebar
+    socket.on("client_presence", ({ conversationId, online }) => {
+      setClientPresence((prev) => ({ ...prev, [conversationId]: online }));
+    });
+    socket.on("client_presence_global", ({ conversationId, online }) => {
+      setClientPresence((prev) => ({ ...prev, [conversationId]: online }));
+    });
+
     // Escucha si una conversación se cerró remotamente
     socket.on("conversation_closed", ({ conversationId }) => {
       if (selectedConvRef.current?._id === conversationId) {
@@ -175,6 +188,13 @@ export default function AgentDashboard() {
       if (res.ok) {
         const data = await res.json();
         setConversations(data);
+
+        // Inicializar presencia con los datos guardados en DB
+        const initialPresence = {};
+        data.forEach((conv) => {
+          initialPresence[conv._id] = !!conv.isOnline;
+        });
+        setClientPresence(initialPresence);
       }
     } catch (err) {
       console.error("Error cargando conversaciones:", err);
@@ -400,11 +420,24 @@ export default function AgentDashboard() {
                     conv.lastMessage || <i>Conversación iniciada</i>
                   )}
                 </p>
-                <div className={styles.convFooter}>
+              <div className={styles.convFooter}>
                   <span>
                     {conv.externalTicketId ? `Ticket: ${conv.externalTicketId}` : `ID: ${conv.customerId.substring(0, 8)}...`}
                   </span>
-                  <span>{formatTime(conv.updatedAt)}</span>
+                  <span className={styles.presenceBadgeSidebar}>
+                    <span
+                      className={`${styles.presenceDot} ${
+                        clientPresence[conv._id] ? styles.online : styles.offline
+                      }`}
+                    />
+                    <span
+                      className={`${styles.presenceLabel} ${
+                        clientPresence[conv._id] ? styles.online : styles.offline
+                      }`}
+                    >
+                      {clientPresence[conv._id] ? "En línea" : "Desconectado"}
+                    </span>
+                  </span>
                 </div>
               </div>
             ))
@@ -429,6 +462,18 @@ export default function AgentDashboard() {
                     {selectedConv.externalTicketId && (
                       <> | Ticket: <strong>{selectedConv.externalTicketId}</strong></>
                     )}
+                  </span>
+                  <span
+                    className={`${styles.presenceBadgeHeader} ${
+                      clientPresence[selectedConv._id] ? styles.online : styles.offline
+                    }`}
+                  >
+                    <span
+                      className={`${styles.presenceDot} ${
+                        clientPresence[selectedConv._id] ? styles.online : styles.offline
+                      }`}
+                    />
+                    {clientPresence[selectedConv._id] ? "En línea" : "Desconectado"}
                   </span>
                 </div>
               </div>

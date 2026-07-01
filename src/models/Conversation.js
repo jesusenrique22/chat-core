@@ -51,6 +51,10 @@ const conversationSchema = new mongoose.Schema({
   lastMessage: {
     type: String,
     default: ''
+  },
+  isOnline: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

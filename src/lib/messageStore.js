@@ -3,6 +3,7 @@
  * Todo mensaje entrante/saliente pasa por aquí → MongoDB + tiempo real.
  */
 
+const Platform = require('../models/Platform');
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const {
@@ -86,6 +87,37 @@ async function recordMessage(
         conversationId: roomId,
         lastMessage: preview
       });
+    }
+  }
+
+  // Disparar notificación externa al sistema de tickets solo si el mensaje proviene del ciudadano (customer)
+  if (conversation.externalTicketId && senderType === 'customer') {
+    let isMaracaibo = false;
+    try {
+      let platform = conversation.platformId;
+      if (platform && typeof platform === 'object' && platform.name) {
+        isMaracaibo = platform.name.toLowerCase().includes('maracaibo');
+      } else if (platform) {
+        // Si no está poblado, cargarlo de la base de datos
+        const platformDoc = await Platform.findById(platform);
+        if (platformDoc) {
+          isMaracaibo = platformDoc.name.toLowerCase().includes('maracaibo');
+        }
+      }
+    } catch (platformErr) {
+      console.error('[Notificación] Error al verificar plataforma:', platformErr.message);
+    }
+
+    if (isMaracaibo) {
+      let customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}`;
+      if (messageType === 'text' && content) {
+        customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}: "${content}"`;
+      } else if (messageType === 'image') {
+        customMessage = `Hey, tienes una imagen nueva en el ticket ${conversation.externalTicketId}`;
+      }
+
+      sendExternalNotification(conversation.externalTicketId, 'mensaje', null, customMessage)
+        .catch((err) => console.error(`[Notificación] Error asíncrono al notificar ticket ${conversation.externalTicketId}:`, err.message));
     }
   }
 
@@ -196,6 +228,49 @@ async function getTicketHistory(ticketId, query = {}) {
   return buildStructuredHistory(conversation, messages, { total, limit, skip });
 }
 
+/**
+ * Envía una notificación HTTP POST a la API externa de notificaciones.
+ * No arroja excepciones para evitar romper el flujo principal del chat si el servidor de notificaciones falla.
+ */
+async function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
+  const url = process.env.NOTIFICATIONS_API_URL || 'https://vf89cz2t-8080.use.devtunnels.ms/notifications/ticket';
+  
+  const messageText = customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`;
+  console.log(`[Notificación] Enviando POST a ${url} para Ticket: ${ticketId}, Tipo: ${type}, Mensaje: "${messageText}"`);
+
+  try {
+    const payload = { 
+      ticketId, 
+      type,
+      message: messageText,
+      text: messageText,
+      description: messageText,
+      body: messageText
+    };
+    if (status) {
+      payload.status = status;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.warn(`[Notificación] Servidor externo respondió con código ${response.status}: ${errorText}`);
+    } else {
+      const data = await response.json().catch(() => ({}));
+      console.log(`[Notificación] Notificación enviada con éxito para Ticket ${ticketId}:`, data.message || 'ok');
+    }
+  } catch (error) {
+    console.error(`[Notificación] Error de conexión al notificar Ticket ${ticketId}:`, error.message);
+  }
+}
+
 module.exports = {
   DELIVERY_CHANNELS,
   recordMessage,
@@ -205,5 +280,6 @@ module.exports = {
   buildStructuredHistory,
   getConversationHistory,
   getTicketHistory,
-  mapMessagesToData
+  mapMessagesToData,
+  sendExternalNotification
 };

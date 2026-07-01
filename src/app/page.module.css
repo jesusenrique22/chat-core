@@ -629,3 +629,87 @@
 .previewRemove:hover {
   color: #f87171;
 }
+
+/* ============================================
+   Indicador de Presencia (Online / Offline)
+   ============================================ */
+
+/* Contenedor del badge completo: dot + texto */
+.presenceBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* Badge en el sidebar (dentro de convFooter) */
+.presenceBadgeSidebar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+/* Badge en el header del chat abierto */
+.presenceBadgeHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+.presenceBadgeHeader.online {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #34d399;
+}
+
+.presenceBadgeHeader.offline {
+  background: rgba(100, 116, 139, 0.1);
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  color: #64748b;
+}
+
+/* El punto indicador */
+.presenceDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+/* Estado: en línea — verde con pulso */
+.presenceDot.online {
+  background: #10b981;
+  box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+  animation: presencePulse 2s infinite;
+}
+
+/* Estado: desconectado — gris apagado */
+.presenceDot.offline {
+  background: #475569;
+  box-shadow: none;
+}
+
+@keyframes presencePulse {
+  0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+  50%  { box-shadow: 0 0 0 5px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+/* Label de texto junto al dot */
+.presenceLabel.online {
+  color: #34d399;
+}
+
+.presenceLabel.offline {
+  color: #475569;
+}
+

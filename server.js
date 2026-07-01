@@ -136,6 +136,40 @@ const server = http.createServer(expressApp);
     }
   });
 
+  // GET /api/integrations/presence/ticket/:ticketId: Consultar presencia del cliente de un ticket por API REST
+  expressApp.get('/api/integrations/presence/ticket/:ticketId', async (req, res) => {
+    const { ticketId } = req.params;
+    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+
+    if (!apiKey) {
+      return res.status(401).json({ error: 'API Key requerida' });
+    }
+
+    try {
+      const platform = await Platform.findOne({ apiKey });
+      if (!platform) {
+        return res.status(401).json({ error: 'API Key no autorizada' });
+      }
+
+      // Buscar conversación activa o la más reciente vinculada al ticket
+      const conversation = await Conversation.findOne({ externalTicketId: ticketId })
+        .sort({ updatedAt: -1 });
+
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversación no encontrada para el ticket especificado' });
+      }
+
+      res.json({
+        ticketId,
+        conversationId: conversation._id,
+        isOnline: !!conversation.isOnline,
+        lastUpdatedAt: conversation.updatedAt
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Subida de imágenes (archivos en disco; MongoDB solo guarda URL)
   registerUploadRoutes(expressApp);
   expressApp.use('/uploads', express.static(UPLOAD_DIR));
@@ -228,9 +262,21 @@ const server = http.createServer(expressApp);
           });
         }
 
+        // Marcar presencia como online en MongoDB
+        await Conversation.findByIdAndUpdate(conversation._id, { isOnline: true });
+
         // Notificar globalmente a los agentes en el dashboard para añadir o actualizar la conversación en su lista
         const populatedConv = await Conversation.findById(conversation._id).populate('platformId');
         agentNamespace.emit('conversation_updated', populatedConv);
+
+        // Notificar presencia: el cliente está en línea
+        const presencePayload = {
+          conversationId: conversation._id.toString(),
+          online: true,
+          customerName: socket.customerName
+        };
+        agentNamespace.to(conversation._id.toString()).emit('client_presence', presencePayload);
+        agentNamespace.emit('client_presence_global', presencePayload);
 
       } catch (err) {
         console.error('Error en join_chat:', err);
@@ -294,14 +340,28 @@ const server = http.createServer(expressApp);
     socket.on('disconnect', (reason) => {
       const conversationId = socket.conversationId;
       if (conversationId) {
-        const payload = {
+        // Limpiar indicador de typing
+        const typingPayload = {
           conversationId,
           senderType: 'customer',
           displayName: socket.customerName,
           isTyping: false
         };
-        agentNamespace.to(conversationId).emit('user_typing', payload);
-        agentNamespace.emit('conversation_typing', payload);
+        agentNamespace.to(conversationId).emit('user_typing', typingPayload);
+        agentNamespace.emit('conversation_typing', typingPayload);
+
+        // Notificar presencia: el cliente se desconectó
+        const presencePayload = {
+          conversationId,
+          online: false,
+          customerName: socket.customerName
+        };
+        agentNamespace.to(conversationId).emit('client_presence', presencePayload);
+        agentNamespace.emit('client_presence_global', presencePayload);
+
+        // Marcar presencia como offline en MongoDB en segundo plano
+        Conversation.findByIdAndUpdate(conversationId, { isOnline: false })
+          .catch(err => console.error('Error al actualizar presencia offline en DB:', err));
       }
       console.log(`🔌 Cliente desvinculado: "${socket.customerName}" (Razón: ${reason})`);
     });
