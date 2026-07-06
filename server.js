@@ -22,6 +22,7 @@ const {
 const {
   DELIVERY_CHANNELS,
   recordMessage,
+  markMessagesReadByCustomer,
   getConversationHistory,
   mapMessagesToData,
   fetchMessagesForConversation
@@ -253,6 +254,9 @@ const server = http.createServer(expressApp);
 
         const { messages } = await fetchMessagesForConversation(conversation._id);
 
+        // El ciudadano abrió el chat: marcar mensajes del agente como vistos
+        await markMessagesReadByCustomer(conversation._id, io);
+
         if (typeof callback === 'function') {
           callback({
             success: true,
@@ -316,6 +320,32 @@ const server = http.createServer(expressApp);
         }
       } catch (err) {
         console.error('Error en send_message cliente:', err);
+        if (typeof callback === 'function') {
+          callback({ success: false, error: err.message });
+        }
+      }
+    });
+
+    // El ciudadano vio los mensajes del agente (chat abierto o mensaje nuevo en pantalla)
+    socket.on('mark_messages_read', async (data, callback) => {
+      try {
+        if (typeof data === 'function') {
+          callback = data;
+          data = {};
+        }
+
+        const conversationId = socket.conversationId;
+        if (!conversationId) {
+          return callback && callback({ success: false, error: 'No hay conversación activa' });
+        }
+
+        const messageId = data?.messageId ? String(data.messageId).trim() : undefined;
+        const result = await markMessagesReadByCustomer(conversationId, io, { messageId });
+        if (typeof callback === 'function') {
+          callback({ success: true, marked: !!result, ...(result || {}) });
+        }
+      } catch (err) {
+        console.error('Error en mark_messages_read:', err);
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }

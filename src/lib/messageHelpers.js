@@ -64,7 +64,8 @@ function toMessageData(doc, conversationId) {
     direction: doc.direction || (doc.senderType === 'customer' ? 'inbound' : 'outbound'),
     externalTicketId: doc.externalTicketId || '',
     customerId: doc.customerId || '',
-    timestamp: doc.timestamp
+    timestamp: doc.timestamp,
+    readByCustomerAt: doc.readByCustomerAt || null
   };
 }
 

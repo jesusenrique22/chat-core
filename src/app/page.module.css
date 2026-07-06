@@ -370,6 +370,21 @@
   color: #64748b;
 }
 
+.readStatusSent,
+.readStatusSeen {
+  margin-left: 6px;
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.readStatusSent {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.readStatusSeen {
+  color: #6ee7b7;
+}
+
 /* Chat Input Area */
 .typingIndicator {
   display: flex;
