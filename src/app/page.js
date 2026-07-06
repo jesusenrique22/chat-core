@@ -161,6 +161,21 @@ export default function AgentDashboard() {
       setClientPresence((prev) => ({ ...prev, [conversationId]: online }));
     });
 
+    socket.on("messages_read", ({ conversationId, messageId, readAt }) => {
+      if (!readAt || selectedConvRef.current?._id !== conversationId) return;
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.senderType !== "agent" || m.readByCustomerAt) return m;
+          if (messageId) {
+            return String(m._id) === String(messageId)
+              ? { ...m, readByCustomerAt: readAt }
+              : m;
+          }
+          return { ...m, readByCustomerAt: readAt };
+        })
+      );
+    });
+
     // Escucha si una conversación se cerró remotamente
     socket.on("conversation_closed", ({ conversationId }) => {
       if (selectedConvRef.current?._id === conversationId) {
@@ -366,6 +381,18 @@ export default function AgentDashboard() {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
+  const renderReadStatus = (msg) => {
+    if (msg.senderType !== "agent") return null;
+    if (msg.readByCustomerAt) {
+      return (
+        <span className={styles.readStatusSeen} title={`Visto ${formatTime(msg.readByCustomerAt)}`}>
+          Visto
+        </span>
+      );
+    }
+    return <span className={styles.readStatusSent}>Enviado</span>;
+  };
+
   // Estilo de insignia según la plataforma
   const getPlatformClass = (platformName) => {
     if (!platformName) return styles.platformDefault;
@@ -513,20 +540,27 @@ export default function AgentDashboard() {
                           {!msg.content && (
                             <span className={styles.imageBubbleTimeOverlay}>
                               {formatTime(msg.timestamp)}
+                              {renderReadStatus(msg)}
                             </span>
                           )}
                         </div>
                         {msg.content && (
                           <div className={styles.imageBubbleFooter}>
                             <p className={styles.imageBubbleCaption}>{msg.content}</p>
-                            <span className={styles.imageBubbleTime}>{formatTime(msg.timestamp)}</span>
+                            <span className={styles.imageBubbleTime}>
+                              {formatTime(msg.timestamp)}
+                              {renderReadStatus(msg)}
+                            </span>
                           </div>
                         )}
                       </>
                     ) : (
                       <>
                         <p style={{ margin: 0 }}>{msg.content}</p>
-                        <span className={styles.bubbleTime}>{formatTime(msg.timestamp)}</span>
+                        <span className={styles.bubbleTime}>
+                          {formatTime(msg.timestamp)}
+                          {renderReadStatus(msg)}
+                        </span>
                       </>
                     )}
                   </div>

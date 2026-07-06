@@ -543,6 +543,9 @@
     socket.on("new_message", (message) => {
       showAgentTyping(null, false);
       appendMessage(message);
+      if (widgetContainer.style.display === "flex") {
+        socket.emit("mark_messages_read", { messageId: message._id });
+      }
     });
 
     // Escuchar si el agente cierra la conversación

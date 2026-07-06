@@ -70,6 +70,9 @@ export default function ChatWidget({ apiKey, customerName, serverUrl = "http://l
         if (prev.some((m) => m._id === message._id)) return prev;
         return [...prev, message];
       });
+      if (message.senderType === "agent") {
+        socket.emit("mark_messages_read", { messageId: message._id });
+      }
     });
 
     socket.on("conversation_closed", () => {

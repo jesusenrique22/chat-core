@@ -216,6 +216,72 @@ async function getConversationHistory(conversationId, query = {}) {
   return buildStructuredHistory(conversation, messages, { total, limit, skip });
 }
 
+/**
+ * Marca como leídos los mensajes del agente que el ciudadano ya vio.
+ * Emite `messages_read` (Socket.IO) y webhook `mensajes_leidos` al Sistema de Tickets.
+ *
+ * @param {string} conversationId
+ * @param {import('socket.io').Server} io
+ * @param {{ messageId?: string }} [options] — sin messageId = todos los no leídos
+ */
+async function markMessagesReadByCustomer(conversationId, io, options = {}) {
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) return null;
+
+  const { messageId } = options;
+  const convId = String(conversationId);
+  const readAt = new Date();
+  const readAtIso = readAt.toISOString();
+
+  const filter = {
+    conversationId: convId,
+    senderType: 'agent',
+    readByCustomerAt: null
+  };
+  if (messageId) {
+    filter._id = messageId;
+  }
+
+  const unread = await Message.find(filter).select('_id');
+  if (!unread.length) return null;
+
+  await Message.updateMany(
+    { _id: { $in: unread.map((doc) => doc._id) } },
+    { $set: { readByCustomerAt: readAt } }
+  );
+
+  const ticketId = String(conversation.externalTicketId || '').trim();
+  const isSingle = !!messageId;
+
+  const payload = {
+    type: isSingle ? 'message_read' : 'messages_read',
+    ticketId,
+    externalTicketId: ticketId,
+    conversationId: convId,
+    readAt: readAtIso
+  };
+  if (isSingle) {
+    payload.messageId = String(messageId);
+  }
+
+  if (io) {
+    io.of('/agent').to(convId).emit('messages_read', payload);
+  }
+
+  if (ticketId) {
+    sendReadReceiptNotification({
+      ticketId,
+      conversationId: convId,
+      readAt: readAtIso,
+      messageId: isSingle ? String(messageId) : undefined
+    }).catch((err) =>
+      console.error(`[Lectura] Error al notificar tickets (${ticketId}):`, err.message)
+    );
+  }
+
+  return payload;
+}
+
 async function getTicketHistory(ticketId, query = {}) {
   const conversation = await findConversationByTicketId(ticketId, { activeOnly: false });
   if (!conversation) {
@@ -226,6 +292,49 @@ async function getTicketHistory(ticketId, query = {}) {
 
   const { messages, total, limit, skip } = await fetchMessagesForConversation(conversation._id, query);
   return buildStructuredHistory(conversation, messages, { total, limit, skip });
+}
+
+/**
+ * Webhook de recibos de lectura → Sistema de Tickets (persistencia).
+ * Tipos: mensajes_leidos (todos) | mensaje_leido (uno).
+ */
+async function sendReadReceiptNotification({ ticketId, conversationId, readAt, messageId }) {
+  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
+  const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
+  const type = messageId ? 'mensaje_leido' : 'mensajes_leidos';
+
+  const payload = {
+    type,
+    ticketId,
+    conversationId,
+    readAt
+  };
+  if (messageId) {
+    payload.messageId = messageId;
+  }
+
+  console.log(`[Lectura] POST ${url} — ticket ${ticketId}, type=${type}`);
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.warn(`[Lectura] Tickets respondió ${response.status}: ${errorText}`);
+    } else {
+      const data = await response.json().catch(() => ({}));
+      console.log(`[Lectura] Webhook ok para ticket ${ticketId}:`, data.success ? 'ok' : JSON.stringify(data));
+    }
+  } catch (error) {
+    console.error(`[Lectura] Error de conexión (ticket ${ticketId}):`, error.message);
+  }
 }
 
 /**
@@ -274,6 +383,7 @@ async function sendExternalNotification(ticketId, type = 'mensaje', status = nul
 module.exports = {
   DELIVERY_CHANNELS,
   recordMessage,
+  markMessagesReadByCustomer,
   loadConversation,
   findConversationByTicketId,
   fetchMessagesForConversation,
@@ -281,5 +391,6 @@ module.exports = {
   getConversationHistory,
   getTicketHistory,
   mapMessagesToData,
-  sendExternalNotification
+  sendExternalNotification,
+  sendReadReceiptNotification
 };

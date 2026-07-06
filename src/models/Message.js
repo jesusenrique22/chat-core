@@ -84,6 +84,12 @@ const messageSchema = new mongoose.Schema({
   timestamp: {
     type: Date,
     default: Date.now
+  },
+  /** Cuándo el ciudadano (Servicios Maracaibo) vio el mensaje del agente */
+  readByCustomerAt: {
+    type: Date,
+    default: null,
+    index: true
   }
 });
 
