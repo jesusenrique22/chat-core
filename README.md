@@ -1,42 +1,39 @@
-# chat-core (conector de chat)
+# chat-core
 
-Backend Express + Socket.io + MongoDB. Conecta **Servicios Maracaibo** (ciudadanos) con el **Sistema de Tickets** (agentes) vía REST y WebSockets.
+API de chat en tiempo real (Express + Socket.io + MongoDB). Conecta **Servicios Maracaibo** con el **Sistema de Tickets**.
+
+Solo backend: REST + WebSockets. Sin HTML, widgets ni dashboard en este repo.
 
 ## Arranque
 
 ```bash
-npm install
+pnpm install
 cp .env.example .env   # completar TODAS las variables [OBLIGATORIA]
-npm run seed           # opcional; también auto-siembra al arrancar
-npm run backend        # http://0.0.0.0:4000
+pnpm run seed          # opcional
+pnpm run backend       # http://0.0.0.0:4000
 ```
 
-Si falta alguna variable crítica (`MONGODB_URI`, `CORS_*`, `BUCKET_*`, `NOTIFICATIONS_*`), el proceso **sale con error** y no usa defaults.
-
-En `NODE_ENV=production`, si MongoDB no responde el proceso **termina** (sin DB en memoria). En desarrollo el fallback in-memory sigue disponible salvo `ALLOW_MEMORY_MONGO=false`.
-
-Producción con PM2:
+Producción (PM2):
 
 ```bash
-npm run start:pm2
-# deploys (cierre ordenado de sockets + wait_ready):
-npm run reload:pm2
+pnpm run start:pm2
+pnpm run reload:pm2    # deploys
 ```
 
-## Auth
+## Superficie
 
-| Canal | Credencial |
-|-------|------------|
-| Widget / app (`/client`) | API Key de plataforma (`X-Api-Key` / `auth.apiKey`) |
-| Integraciones Tickets/Maracaibo | API Key de plataforma |
-| Namespace `/agent` y `GET /api/conversations*` | Abierto (sin auth; monitoreo externo) |
+| Canal | Auth |
+|-------|------|
+| REST `/api/integrations/*`, `/api/uploads/image` | `X-Api-Key` de plataforma |
+| Socket `/client` | `auth.apiKey` + datos de cliente |
+| Socket `/agent` | Abierto (monitoreo) |
+| REST `/api/conversations*` | Abierto (monitoreo) |
 
 ## Observabilidad
 
-- Health: `GET /api/integrations/health` → `ok`, `mongo`, `uptimeSec` (503 si Mongo caído)
-- Logs: una línea JSON por evento (`level`, `msg`, …). Nivel con `LOG_LEVEL=info|warn|error|debug`
+- `GET /api/integrations/health` → `ok`, `mongo`, `uptimeSec` (503 si Mongo caído)
+- Logs JSON (`LOG_LEVEL=info|warn|error|debug`)
 
 ## Docs
 
-- `INTEGRACION.md` — conector Maracaibo ↔ Tickets
-- `PLAN-SEGURIDAD-OPTIMIZACION.md` — plan por fases
+- `INTEGRACION.md` — contratos REST / Socket Maracaibo ↔ Tickets

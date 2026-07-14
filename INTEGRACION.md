@@ -15,74 +15,17 @@ Este proyecto actúa como **conector central**: valida peticiones de **Servicios
 
 ---
 
-## CORS y compartir en red local (sin VPN)
+## CORS
 
-Tu compañero debe estar en la **misma Wi‑Fi/red** que tú.
-
-### 1. Arranca el backend y copia la IP
-
-```bash
-npm run backend
-```
-
-La consola muestra algo como:
-
-```
-📡 Compartir en red local (sin VPN):
-   Backend + widget:  http://192.168.1.50:4000
-```
-
-Pasa esa URL a tu compañero.
-
-### 2. URLs para compartir
-
-| Recurso | URL |
-|---------|-----|
-| Widget / API | `http://TU_IP:4000` |
-| Demo Maracaibo | `http://TU_IP:4000/maracaibo.html` |
-| Dashboard agentes | `http://TU_IP:3000` |
-| Health | `http://TU_IP:4000/api/integrations/health` |
-
-### 3. CORS automático en LAN
-
-Con `CORS_ALLOW_LAN=true` (por defecto en `.env`) se permiten orígenes:
-
-- `192.168.x.x` (Wi‑Fi doméstica/oficina)
-- `10.x.x.x` y `172.16–31.x.x`
-- `localhost`
-
-### 4. Widget en la web del compañero
-
-```html
-<script
-  src="http://192.168.1.50:4000/widget.js"
-  data-api-key="maracaibo_secret_key_2026"
-  data-customer-name="Nombre"
-  data-server-url="http://192.168.1.50:4000">
-</script>
-```
-
-(Reemplaza `192.168.1.50` por tu IP real.)
-
-### 5. Demo proyecto externo (otro puerto)
-
-```bash
-npx serve demo-cliente-externo -p 8181
-```
-
-Abrir: `http://IP_DEL_COMPAÑERO:8181?server=192.168.1.50`
-
-### 6. Si usas túnel (ngrok, etc.)
-
-Agrega la URL en `.env`:
+Este repo es **solo API** (sin HTML ni widget). Configura orígenes en `.env`:
 
 ```env
-CORS_EXTRA_ORIGINS=https://xxxx.ngrok-free.app
+CORS_ALLOW_LAN=false
+CORS_ALLOW_ALL=false
+CORS_EXTRA_ORIGINS=https://app.tudominio.com,https://tickets.tudominio.com
 ```
 
-### 7. macOS: permitir conexiones entrantes
-
-Preferencias → Red → Firewall: permitir **Node** en red privada.
+Health: `GET /api/integrations/health`
 
 ---
 
@@ -274,20 +217,6 @@ Respuesta:
 | Campo multipart | `image` |
 | Header upload | `X-Api-Key: maracaibo_secret_key_2026` (ciudadano) o `tickets_secret_key_2026` (agente/tickets) |
 
-**Widget en la máquina del compañero (misma Wi‑Fi):**
-
-```html
-<script
-  src="http://192.168.0.11:4000/widget.js"
-  data-api-key="maracaibo_secret_key_2026"
-  data-server-url="http://192.168.0.11:4000"
-  data-customer-name="Nombre"
-  data-ticket-id="TEST-001">
-</script>
-```
-
-(Reemplaza `192.168.0.11` por la IP que muestra `npm run backend`.)
-
 **Enviar imagen desde Tickets (REST):**
 
 ```bash
@@ -307,19 +236,6 @@ curl -X POST http://localhost:4000/api/integrations/messages \
     "agentName": "María López"
   }'
 ```
-
----
-
-## Widget web (prueba rápida)
-
-En `maracaibo.html` ya incluye `data-ticket-id="TEST-001"`.
-
-1. Reinicia backend: `kill $(lsof -t -i :4000); npm run backend`
-2. Abre `http://localhost:4000/maracaibo.html` y abre el chat
-3. Ejecuta el `curl` del paso 2 (mensajes desde tickets)
-4. Debe aparecer el mensaje en el widget al instante
-
-**Nota:** El `customerId` del widget se genera en `localStorage`. Para prueba con curl, primero ejecuta `link` y usa el mismo flujo, o borra `localStorage` y fija `customerId` en el HTML si lo personalizas.
 
 ---
 
@@ -359,7 +275,8 @@ Socket namespace `/agent` (sin auth de agente).
 ## Script de prueba automática
 
 ```bash
-npm run test:connector
+pnpm run test:connector
+# o: npm run test:connector
 ```
 
 (Requiere backend en marcha en el puerto 4000.)

@@ -81,7 +81,7 @@ const server = http.createServer(expressApp);
     crossOriginResourcePolicy: { policy: 'cross-origin' }
   }));
 
-  // CORS: Express (widget.js, API REST, socket.io.js) — permisivo según .env / plataformas
+  // CORS: API REST + Socket.io
   const corsOriginHandler = createCorsOriginHandler();
   expressApp.use(cors({
     origin: corsOriginHandler,
@@ -193,9 +193,6 @@ const server = http.createServer(expressApp);
 
   // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
-
-  // Servir contenido estático (widget.js y demos) desde public/
-  expressApp.use(express.static('public'));
 
   // ============================================
   // Configuración de Socket.io

@@ -153,9 +153,10 @@ function createCorsOriginHandler() {
 function logShareUrls(port) {
   const ip = getLocalNetworkIp();
   logger.info('share_urls', {
-    widget: `http://${ip}:${port}`,
-    demo: `http://${ip}:${port}/maracaibo.html`,
-    health: `http://${ip}:${port}/api/integrations/health`
+    api: `http://${ip}:${port}`,
+    health: `http://${ip}:${port}/api/integrations/health`,
+    socketClient: `http://${ip}:${port}/client`,
+    socketAgent: `http://${ip}:${port}/agent`
   });
 }
 

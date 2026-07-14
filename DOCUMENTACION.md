@@ -1,6 +1,8 @@
 # Documentación del Proyecto: Chat Multitrabajo Centralizado
 
-¡Bienvenido! Este documento proporciona un desglose completo de la arquitectura de tu sistema de chat multi-servicio, explicando qué componentes están listos, qué base de datos se utiliza, qué elementos hacen falta y cómo integrar tu aplicación móvil o externa.
+> **Nota (2026):** Este repo es **solo API** (REST + Socket.io). Ya no incluye HTML, `widget.js` ni dashboard Next. Para contratos actuales ver `INTEGRACION.md` y `README.md`. Lo siguiente puede estar desactualizado en partes de UI.
+
+¡Bienvenido! Este documento proporciona un desglose completo de la arquitectura de tu sistema de chat multi-servicio, explicando qué componentes estaban listos históricamente, qué base de datos se utiliza y cómo integrar tu aplicación móvil o externa.
 
 ---
 
