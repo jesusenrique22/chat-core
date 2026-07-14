@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# chat-core (conector de chat)
 
-## Getting Started
+Backend Express + Socket.io + MongoDB. Conecta **Servicios Maracaibo** (ciudadanos) con el **Sistema de Tickets** (agentes) vía REST y WebSockets.
 
-First, run the development server:
+## Arranque
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env   # completar TODAS las variables [OBLIGATORIA]
+npm run seed           # opcional; también auto-siembra al arrancar
+npm run backend        # http://0.0.0.0:4000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Si falta alguna variable crítica (`MONGODB_URI`, `CORS_*`, `BUCKET_*`, `NOTIFICATIONS_*`), el proceso **sale con error** y no usa defaults.
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+En `NODE_ENV=production`, si MongoDB no responde el proceso **termina** (sin DB en memoria). En desarrollo el fallback in-memory sigue disponible salvo `ALLOW_MEMORY_MONGO=false`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Producción con PM2:
 
-## Learn More
+```bash
+npm run start:pm2
+# deploys (cierre ordenado de sockets + wait_ready):
+npm run reload:pm2
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Auth
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Canal | Credencial |
+|-------|------------|
+| Widget / app (`/client`) | API Key de plataforma (`X-Api-Key` / `auth.apiKey`) |
+| Integraciones Tickets/Maracaibo | API Key de plataforma |
+| Namespace `/agent` y `GET /api/conversations*` | Abierto (sin auth; monitoreo externo) |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Observabilidad
 
-## Deploy on Vercel
+- Health: `GET /api/integrations/health` → `ok`, `mongo`, `uptimeSec` (503 si Mongo caído)
+- Logs: una línea JSON por evento (`level`, `msg`, …). Nivel con `LOG_LEVEL=info|warn|error|debug`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Docs
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `INTEGRACION.md` — conector Maracaibo ↔ Tickets
+- `PLAN-SEGURIDAD-OPTIMIZACION.md` — plan por fases

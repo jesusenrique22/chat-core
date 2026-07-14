@@ -106,6 +106,20 @@ Preferencias → Red → Firewall: permitir **Node** en red privada.
 curl http://localhost:4000/api/integrations/health
 ```
 
+Respuesta (campos originales + aditivos). Si Mongo falla → HTTP `503` y `"ok": false`.
+
+```json
+{
+  "ok": true,
+  "service": "chat-multiservicio-connector",
+  "version": "1.0.0",
+  "uptimeSec": 120,
+  "startedAt": "2026-07-14T16:00:00.000Z",
+  "mongo": { "ok": true, "state": "connected" },
+  "timestamp": "2026-07-14T16:02:00.000Z"
+}
+```
+
 ### 1. Enlazar ticket con conversación de chat
 
 **Quién:** Backend Maracaibo (después de crear el ticket) o Tickets.
@@ -185,7 +199,7 @@ Cada mensaje incluye: `deliveryChannel`, `direction`, `externalTicketId`, `custo
 }
 ```
 
-**Eventos:** `join_chat`, `send_message`, `client_typing` (sin cambios).
+**Eventos:** `join_chat`, `send_message`, `client_typing`, `mark_messages_read`, `load_older_messages` (Socket; sin cambiar REST).
 
 **Mensaje de texto:**
 
@@ -225,7 +239,7 @@ socket.emit("send_message", {
 
 ## Subida de imágenes (REST)
 
-Las imágenes se guardan en disco (`uploads/`); MongoDB solo almacena la URL (~150 bytes).
+Las imágenes se suben al **bucket** (`folder=ticket_chat` vía `api-bucket.smart.com.ve`). El conector hace de proxy; MongoDB solo guarda la URL pública.
 
 ```bash
 curl -X POST http://localhost:4000/api/uploads/image \
@@ -238,7 +252,8 @@ Respuesta:
 ```json
 {
   "success": true,
-  "url": "http://192.168.0.11:4000/uploads/abc-uuid.jpg",
+  "url": "https://bucket.smart.com.ve/imau/ticket_chat/....jpg",
+  "key": "ticket_chat/....jpg",
   "mimeType": "image/jpeg",
   "sizeBytes": 84200,
   "fileName": "foto.jpg"
@@ -247,9 +262,8 @@ Respuesta:
 
 - Formatos: JPG, PNG, WEBP, GIF
 - Tamaño máximo: 3 MB (`UPLOAD_MAX_BYTES` en `.env`)
-- Si los clientes acceden por IP LAN distinta al host del servidor, define `PUBLIC_BASE_URL=http://TU_IP:4000` en `.env` para que las URLs de imagen sean accesibles
-- **Importante:** Si abres el chat con `localhost`, las imágenes nuevas ya salen con IP LAN (`PUBLIC_BASE_URL`). Tu compañero debe abrir el widget con `http://TU_IP:4000/...`, no `localhost`.
-- En la app del compañero, el script del widget **debe** incluir `data-server-url="http://TU_IP:4000"` para subir y ver imágenes.
+- Variables: `BUCKET_UPLOAD_URL`, `BUCKET_API_KEY`, `BUCKET_FOLDER=ticket_chat`
+- Ya no se usa el directorio local `/uploads` del droplet
 
 **Parámetros de imagen (ciudadano y agente):**
 
@@ -285,7 +299,7 @@ curl -X POST http://localhost:4000/api/integrations/messages \
     "messageType": "image",
     "content": "Aquí está el comprobante",
     "attachment": {
-      "url": "http://192.168.0.11:4000/uploads/abc-uuid.jpg",
+      "url": "https://bucket.smart.com.ve/imau/ticket_chat/abc-uuid.jpg",
       "mimeType": "image/jpeg",
       "sizeBytes": 84200,
       "fileName": "comprobante.jpg"
@@ -330,9 +344,15 @@ await fetch('http://localhost:4000/api/integrations/messages', {
 
 ---
 
-## Dashboard de agentes (monitoreo)
+## Monitoreo vía API / Socket `/agent`
 
-`http://TU_IP:3000` — muestra conversaciones y el **Ticket: TEST-001** en la cabecera. Los mensajes enviados por la API de tickets también aparecen aquí.
+Este repo ya **no incluye** el dashboard Next.js. Para listar conversaciones o escuchar en tiempo real:
+
+```bash
+curl "http://localhost:4000/api/conversations"
+```
+
+Socket namespace `/agent` (sin auth de agente).
 
 ---
 

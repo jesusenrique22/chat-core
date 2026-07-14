@@ -62,5 +62,6 @@ const conversationSchema = new mongoose.Schema({
 
 conversationSchema.index({ customerId: 1, platformId: 1, status: 1 });
 conversationSchema.index({ externalTicketId: 1, status: 1 });
+conversationSchema.index({ status: 1, updatedAt: -1 });
 
 module.exports = mongoose.model('Conversation', conversationSchema);

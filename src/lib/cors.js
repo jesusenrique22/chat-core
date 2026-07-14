@@ -5,6 +5,26 @@
 
 const os = require('os');
 const Platform = require('../models/Platform');
+const logger = require('./logger');
+
+const CORS_CACHE_TTL_MS = Number(process.env.CORS_CACHE_TTL_MS) || 5 * 60 * 1000;
+let platformOriginsCache = null;
+let platformOriginsCacheAt = 0;
+
+async function getCachedPlatformOrigins() {
+  const now = Date.now();
+  if (platformOriginsCache && now - platformOriginsCacheAt < CORS_CACHE_TTL_MS) {
+    return platformOriginsCache;
+  }
+  platformOriginsCache = await Platform.find().select('allowedOrigins').lean();
+  platformOriginsCacheAt = now;
+  return platformOriginsCache;
+}
+
+function invalidatePlatformOriginsCache() {
+  platformOriginsCache = null;
+  platformOriginsCacheAt = 0;
+}
 
 function getExtraOrigins() {
   return (process.env.CORS_EXTRA_ORIGINS || '')
@@ -42,7 +62,7 @@ function isDevOrigin(origin) {
 
   const match = origin.match(/^https?:\/\/([^/:]+)(:\d+)?/i);
   if (match && isPrivateLanIp(match[1])) {
-    return process.env.CORS_ALLOW_LAN !== 'false';
+    return process.env.CORS_ALLOW_LAN === 'true';
   }
 
   return false;
@@ -66,12 +86,12 @@ async function isOriginAllowedGlobally(origin) {
   if (matchesAllowedList(origin, extra)) return true;
 
   try {
-    const allPlatforms = await Platform.find().select('allowedOrigins');
+    const allPlatforms = await getCachedPlatformOrigins();
     for (const platform of allPlatforms) {
       if (matchesAllowedList(origin, platform.allowedOrigins)) return true;
     }
   } catch (err) {
-    console.error('Error validando CORS:', err);
+    logger.error('cors_validate_error', { error: err.message });
     return false;
   }
 
@@ -111,8 +131,9 @@ async function syncMaracaiboOriginsOnStartup() {
       { name: 'Sistema de Tickets' },
       { $addToSet: { allowedOrigins: { $each: defaults } } }
     );
+    invalidatePlatformOriginsCache();
   } catch (err) {
-    console.error('Error sincronizando CORS:', err);
+    logger.error('cors_sync_error', { error: err.message });
   }
 }
 
@@ -121,7 +142,7 @@ function createCorsOriginHandler() {
     try {
       const allowed = await isOriginAllowedGlobally(origin);
       if (allowed) return callback(null, true);
-      console.warn(`⛔ CORS bloqueado: ${origin || '(sin origin)'}`);
+      logger.warn('cors_blocked', { origin: origin || '(sin origin)' });
       return callback(new Error(`CORS bloqueado para el origen: ${origin}`));
     } catch (err) {
       return callback(err);
@@ -131,13 +152,11 @@ function createCorsOriginHandler() {
 
 function logShareUrls(port) {
   const ip = getLocalNetworkIp();
-  console.log('');
-  console.log('📡 Compartir en red local (sin VPN):');
-  console.log(`   Backend + widget:  http://${ip}:${port}`);
-  console.log(`   Demo Maracaibo:    http://${ip}:${port}/maracaibo.html`);
-  console.log(`   Health API:        http://${ip}:${port}/api/integrations/health`);
-  console.log(`   Dashboard agentes: http://${ip}:3000  (npm run dev)`);
-  console.log('');
+  logger.info('share_urls', {
+    widget: `http://${ip}:${port}`,
+    demo: `http://${ip}:${port}/maracaibo.html`,
+    health: `http://${ip}:${port}/api/integrations/health`
+  });
 }
 
 module.exports = {
@@ -147,6 +166,7 @@ module.exports = {
   isOriginAllowedGlobally,
   isOriginAllowedForPlatform,
   syncMaracaiboOriginsOnStartup,
+  invalidatePlatformOriginsCache,
   createCorsOriginHandler,
   logShareUrls
 };

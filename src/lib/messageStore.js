@@ -3,14 +3,16 @@
  * Todo mensaje entrante/saliente pasa por aquí → MongoDB + tiempo real.
  */
 
-const Platform = require('../models/Platform');
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
+const { AGENTS_DASHBOARD_ROOM } = require('./socketRooms');
 const {
   getLastMessagePreview,
   toMessageData,
   mapMessagesToData
 } = require('./messageHelpers');
+const { NOTIFICATIONS_API_URL, NOTIFICATIONS_API_KEY } = require('./env');
+const logger = require('./logger');
 
 const DELIVERY_CHANNELS = {
   SOCKET_CLIENT: 'socket_client',
@@ -18,6 +20,10 @@ const DELIVERY_CHANNELS = {
   REST_TICKETS: 'rest_tickets',
   REST_MARACAIBO: 'rest_maracaibo'
 };
+
+const JOIN_CHAT_MESSAGE_LIMIT = Number(process.env.JOIN_CHAT_MESSAGE_LIMIT) || 50;
+const DEFAULT_HISTORY_LIMIT = 500;
+const MAX_HISTORY_LIMIT = 2000;
 
 async function loadConversation(conversationId) {
   const conversation = await Conversation.findById(conversationId).populate('platformId');
@@ -27,6 +33,24 @@ async function loadConversation(conversationId) {
     throw err;
   }
   return conversation;
+}
+
+/** Maracaibo sin query extra si platform está poblado o sourceChannel lo indica. */
+function isMaracaiboConversation(conversation) {
+  const platform = conversation.platformId;
+  if (platform && typeof platform === 'object' && platform.name) {
+    return String(platform.name).toLowerCase().includes('maracaibo');
+  }
+  const channel = conversation.sourceChannel || '';
+  return channel.startsWith('maracaibo');
+}
+
+function scheduleAsync(task, label) {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(task)
+      .catch((err) => logger.error('async_task_failed', { label, error: err.message }));
+  });
 }
 
 /**
@@ -47,25 +71,26 @@ async function recordMessage(
 ) {
   const conversation = conversationDoc || (await loadConversation(conversationId));
   const convId = conversation._id;
-
-  const newMessage = await Message.create({
-    conversationId: convId,
-    senderType,
-    messageType: messageType || 'text',
-    content: content || '',
-    attachment: attachment || null,
-    senderName: senderName || '',
-    deliveryChannel: deliveryChannel || DELIVERY_CHANNELS.SOCKET_CLIENT,
-    externalTicketId: conversation.externalTicketId || '',
-    customerId: conversation.customerId,
-    direction: senderType === 'customer' ? 'inbound' : 'outbound'
-  });
-
   const preview = getLastMessagePreview(messageType, content);
-  await Conversation.findByIdAndUpdate(convId, {
-    lastMessage: preview,
-    updatedAt: new Date()
-  });
+
+  const [newMessage] = await Promise.all([
+    Message.create({
+      conversationId: convId,
+      senderType,
+      messageType: messageType || 'text',
+      content: content || '',
+      attachment: attachment || null,
+      senderName: senderName || '',
+      deliveryChannel: deliveryChannel || DELIVERY_CHANNELS.SOCKET_CLIENT,
+      externalTicketId: conversation.externalTicketId || '',
+      customerId: conversation.customerId,
+      direction: senderType === 'customer' ? 'inbound' : 'outbound'
+    }),
+    Conversation.findByIdAndUpdate(convId, {
+      lastMessage: preview,
+      updatedAt: new Date()
+    })
+  ]);
 
   const messageData = toMessageData(newMessage, convId);
   const roomId = convId.toString();
@@ -76,49 +101,37 @@ async function recordMessage(
 
     if (senderType === 'customer') {
       agentNamespace.to(roomId).emit('new_message', messageData);
-      agentNamespace.emit('conversation_message_received', {
+      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_message_received', {
         conversationId: roomId,
         lastMessage: preview
       });
     } else {
       clientNamespace.to(roomId).emit('new_message', messageData);
       agentNamespace.to(roomId).emit('new_message', messageData);
-      agentNamespace.emit('conversation_message_received', {
+      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_message_received', {
         conversationId: roomId,
         lastMessage: preview
       });
     }
   }
 
-  // Disparar notificación externa al sistema de tickets solo si el mensaje proviene del ciudadano (customer)
-  if (conversation.externalTicketId && senderType === 'customer') {
-    let isMaracaibo = false;
-    try {
-      let platform = conversation.platformId;
-      if (platform && typeof platform === 'object' && platform.name) {
-        isMaracaibo = platform.name.toLowerCase().includes('maracaibo');
-      } else if (platform) {
-        // Si no está poblado, cargarlo de la base de datos
-        const platformDoc = await Platform.findById(platform);
-        if (platformDoc) {
-          isMaracaibo = platformDoc.name.toLowerCase().includes('maracaibo');
-        }
-      }
-    } catch (platformErr) {
-      console.error('[Notificación] Error al verificar plataforma:', platformErr.message);
+  if (
+    conversation.externalTicketId &&
+    senderType === 'customer' &&
+    isMaracaiboConversation(conversation)
+  ) {
+    const ticketId = conversation.externalTicketId;
+    let customMessage = `Hey, tienes un mensaje en el ticket ${ticketId}`;
+    if (messageType === 'text' && content) {
+      customMessage = `Hey, tienes un mensaje en el ticket ${ticketId}: "${content}"`;
+    } else if (messageType === 'image') {
+      customMessage = `Hey, tienes una imagen nueva en el ticket ${ticketId}`;
     }
 
-    if (isMaracaibo) {
-      let customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}`;
-      if (messageType === 'text' && content) {
-        customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}: "${content}"`;
-      } else if (messageType === 'image') {
-        customMessage = `Hey, tienes una imagen nueva en el ticket ${conversation.externalTicketId}`;
-      }
-
-      sendExternalNotification(conversation.externalTicketId, 'mensaje', null, customMessage)
-        .catch((err) => console.error(`[Notificación] Error asíncrono al notificar ticket ${conversation.externalTicketId}:`, err.message));
-    }
+    scheduleAsync(
+      () => sendExternalNotification(ticketId, 'mensaje', null, customMessage),
+      `notificar ticket ${ticketId}`
+    );
   }
 
   return { message: messageData, conversation };
@@ -139,7 +152,10 @@ async function findConversationByTicketId(ticketId, { activeOnly = false } = {})
 }
 
 function parseHistoryQuery(query) {
-  const limit = Math.min(Math.max(parseInt(query.limit, 10) || 500, 1), 2000);
+  const limit = Math.min(
+    Math.max(parseInt(query.limit, 10) || DEFAULT_HISTORY_LIMIT, 1),
+    MAX_HISTORY_LIMIT
+  );
   const skip = Math.max(parseInt(query.skip, 10) || 0, 0);
   const filter = {};
 
@@ -169,6 +185,36 @@ async function fetchMessagesForConversation(conversationId, query = {}) {
   ]);
 
   return { messages, total, limit, skip };
+}
+
+/** Últimos N mensajes en orden cronológico (para join_chat). */
+async function fetchRecentMessagesForConversation(conversationId, limit = JOIN_CHAT_MESSAGE_LIMIT) {
+  const capped = Math.min(Math.max(parseInt(limit, 10) || JOIN_CHAT_MESSAGE_LIMIT, 1), MAX_HISTORY_LIMIT);
+  const messages = await Message.find({ conversationId })
+    .sort({ timestamp: -1 })
+    .limit(capped);
+  messages.reverse();
+  return messages;
+}
+
+/** Mensajes anteriores a un timestamp (cursor hacia atrás). */
+async function fetchOlderMessagesForConversation(
+  conversationId,
+  before,
+  limit = JOIN_CHAT_MESSAGE_LIMIT
+) {
+  if (!before) {
+    return { messages: [], hasMore: false };
+  }
+  const capped = Math.min(Math.max(parseInt(limit, 10) || JOIN_CHAT_MESSAGE_LIMIT, 1), MAX_HISTORY_LIMIT);
+  const messages = await Message.find({
+    conversationId,
+    timestamp: { $lt: new Date(before) }
+  })
+    .sort({ timestamp: -1 })
+    .limit(capped);
+  messages.reverse();
+  return { messages, hasMore: messages.length === capped };
 }
 
 function computeMessageStats(messages) {
@@ -225,13 +271,8 @@ async function getConversationHistory(conversationId, query = {}) {
  * @param {{ messageId?: string }} [options] — sin messageId = todos los no leídos
  */
 async function markMessagesReadByCustomer(conversationId, io, options = {}) {
-  const conversation = await Conversation.findById(conversationId);
-  if (!conversation) return null;
-
   const { messageId } = options;
   const convId = String(conversationId);
-  const readAt = new Date();
-  const readAtIso = readAt.toISOString();
 
   const filter = {
     conversationId: convId,
@@ -242,13 +283,17 @@ async function markMessagesReadByCustomer(conversationId, io, options = {}) {
     filter._id = messageId;
   }
 
-  const unread = await Message.find(filter).select('_id');
-  if (!unread.length) return null;
+  // Early exit barato: sin unread → sin update ni webhook
+  const hasUnread = await Message.exists(filter);
+  if (!hasUnread) return null;
 
-  await Message.updateMany(
-    { _id: { $in: unread.map((doc) => doc._id) } },
-    { $set: { readByCustomerAt: readAt } }
-  );
+  const conversation = await Conversation.findById(conversationId).select('externalTicketId');
+  if (!conversation) return null;
+
+  const readAt = new Date();
+  const readAtIso = readAt.toISOString();
+
+  await Message.updateMany(filter, { $set: { readByCustomerAt: readAt } });
 
   const ticketId = String(conversation.externalTicketId || '').trim();
   const isSingle = !!messageId;
@@ -269,13 +314,15 @@ async function markMessagesReadByCustomer(conversationId, io, options = {}) {
   }
 
   if (ticketId) {
-    sendReadReceiptNotification({
-      ticketId,
-      conversationId: convId,
-      readAt: readAtIso,
-      messageId: isSingle ? String(messageId) : undefined
-    }).catch((err) =>
-      console.error(`[Lectura] Error al notificar tickets (${ticketId}):`, err.message)
+    scheduleAsync(
+      () =>
+        sendReadReceiptNotification({
+          ticketId,
+          conversationId: convId,
+          readAt: readAtIso,
+          messageId: isSingle ? String(messageId) : undefined
+        }),
+      `lectura ticket ${ticketId}`
     );
   }
 
@@ -299,8 +346,6 @@ async function getTicketHistory(ticketId, query = {}) {
  * Tipos: mensajes_leidos (todos) | mensaje_leido (uno).
  */
 async function sendReadReceiptNotification({ ticketId, conversationId, readAt, messageId }) {
-  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
-  const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
   const type = messageId ? 'mensaje_leido' : 'mensajes_leidos';
 
   const payload = {
@@ -313,27 +358,30 @@ async function sendReadReceiptNotification({ ticketId, conversationId, readAt, m
     payload.messageId = messageId;
   }
 
-  console.log(`[Lectura] POST ${url} — ticket ${ticketId}, type=${type}`);
+  logger.info('read_receipt_webhook', { ticketId, type });
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(NOTIFICATIONS_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Api-Key': apiKey
+        'X-Api-Key': NOTIFICATIONS_API_KEY
       },
       body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      console.warn(`[Lectura] Tickets respondió ${response.status}: ${errorText}`);
+      logger.warn('read_receipt_webhook_failed', {
+        ticketId,
+        status: response.status,
+        body: errorText.slice(0, 200)
+      });
     } else {
-      const data = await response.json().catch(() => ({}));
-      console.log(`[Lectura] Webhook ok para ticket ${ticketId}:`, data.success ? 'ok' : JSON.stringify(data));
+      logger.info('read_receipt_webhook_ok', { ticketId, type });
     }
   } catch (error) {
-    console.error(`[Lectura] Error de conexión (ticket ${ticketId}):`, error.message);
+    logger.error('read_receipt_webhook_error', { ticketId, error: error.message });
   }
 }
 
@@ -342,16 +390,12 @@ async function sendReadReceiptNotification({ ticketId, conversationId, readAt, m
  * No arroja excepciones para evitar romper el flujo principal del chat si el servidor de notificaciones falla.
  */
 async function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
-  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
-  const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
-  
   const messageText = customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`;
-  console.log(`[Notificación] Enviando POST a ${url} para Ticket: ${ticketId}, Tipo: ${type}, Mensaje: "${messageText}"`);
+  logger.info('ticket_notification', { ticketId, type });
 
   try {
-    // Payload exacto que espera el Sistema de Tickets
-    const payload = { 
-      ticketId, 
+    const payload = {
+      ticketId,
       type,
       message: messageText
     };
@@ -359,34 +403,40 @@ async function sendExternalNotification(ticketId, type = 'mensaje', status = nul
       payload.status = status;
     }
 
-    const response = await fetch(url, {
+    const response = await fetch(NOTIFICATIONS_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Api-Key': apiKey
+        'X-Api-Key': NOTIFICATIONS_API_KEY
       },
       body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');
-      console.warn(`[Notificación] Servidor externo respondió con código ${response.status}: ${errorText}`);
+      logger.warn('ticket_notification_failed', {
+        ticketId,
+        status: response.status,
+        body: errorText.slice(0, 200)
+      });
     } else {
-      const data = await response.json().catch(() => ({}));
-      console.log(`[Notificación] Notificación enviada con éxito para Ticket ${ticketId}:`, data.success ? 'ok' : JSON.stringify(data));
+      logger.info('ticket_notification_ok', { ticketId, type });
     }
   } catch (error) {
-    console.error(`[Notificación] Error de conexión al notificar Ticket ${ticketId}:`, error.message);
+    logger.error('ticket_notification_error', { ticketId, error: error.message });
   }
 }
 
 module.exports = {
   DELIVERY_CHANNELS,
+  JOIN_CHAT_MESSAGE_LIMIT,
   recordMessage,
   markMessagesReadByCustomer,
   loadConversation,
   findConversationByTicketId,
   fetchMessagesForConversation,
+  fetchRecentMessagesForConversation,
+  fetchOlderMessagesForConversation,
   buildStructuredHistory,
   getConversationHistory,
   getTicketHistory,

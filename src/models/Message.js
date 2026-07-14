@@ -1,5 +1,5 @@
 /**
- * Modelo: Message — texto (emojis UTF-8) o imagen (URL en attachment, archivo en /uploads).
+ * Modelo: Message — texto (emojis UTF-8) o imagen (URL pública en attachment, archivo en bucket).
  */
 
 const mongoose = require('mongoose');

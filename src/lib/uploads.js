@@ -1,43 +1,22 @@
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
+/**
+ * Subida de imágenes → bucket remoto (api-bucket).
+ * El conector no guarda archivos en disco; MongoDB solo almacena la URL pública.
+ */
+
 const multer = require('multer');
 const { authenticateRequest } = require('./integrations');
 const { MAX_IMAGE_BYTES } = require('./messageHelpers');
-const { getPublicBaseUrl } = require('./publicUrl');
+const {
+  BUCKET_UPLOAD_URL,
+  BUCKET_API_KEY,
+  BUCKET_FOLDER
+} = require('./env');
+const logger = require('./logger');
 
-const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 const ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
-function ensureUploadDir() {
-  if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  }
-}
-
-function getPublicBase(req) {
-  const configured = getPublicBaseUrl();
-  if (configured) return configured;
-  if (process.env.PUBLIC_BASE_URL) {
-    return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
-  }
-  return `${req.protocol}://${req.get('host')}`;
-}
-
-const storage = multer.diskStorage({
-  destination(_req, _file, cb) {
-    ensureUploadDir();
-    cb(null, UPLOAD_DIR);
-  },
-  filename(_req, file, cb) {
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    const safeExt = ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext) ? ext : '.jpg';
-    cb(null, `${crypto.randomUUID()}${safeExt}`);
-  }
-});
-
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
   fileFilter(_req, file, cb) {
     if (!ALLOWED_MIMES.has(file.mimetype)) {
@@ -47,9 +26,60 @@ const upload = multer({
   }
 });
 
-function registerUploadRoutes(expressApp) {
-  ensureUploadDir();
+/**
+ * Reenvía el archivo al bucket y devuelve metadatos públicos.
+ */
+async function uploadBufferToBucket(buffer, { originalName, mimeType }) {
+  const fileName = (originalName || 'image.jpg').replace(/[/\\]/g, '_');
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: mimeType || 'application/octet-stream' }), fileName);
+  form.append('folder', BUCKET_FOLDER);
 
+  let response;
+  try {
+    response = await fetch(BUCKET_UPLOAD_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': BUCKET_API_KEY },
+      body: form
+    });
+  } catch (networkErr) {
+    const err = new Error(`No se pudo conectar al bucket: ${networkErr.message}`);
+    err.status = 502;
+    throw err;
+  }
+
+  const raw = await response.text();
+  let data;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = { raw };
+  }
+
+  if (!response.ok) {
+    const err = new Error(
+      data.error || data.message || `Bucket respondió ${response.status}`
+    );
+    err.status = response.status >= 400 && response.status < 600 ? response.status : 502;
+    throw err;
+  }
+
+  if (!data.url) {
+    const err = new Error('Respuesta del bucket sin URL pública');
+    err.status = 502;
+    throw err;
+  }
+
+  return {
+    key: data.key || '',
+    url: data.url,
+    mimeType: data.contentType || mimeType,
+    sizeBytes: Number(data.size) || buffer.length,
+    fileName
+  };
+}
+
+function registerUploadRoutes(expressApp) {
   expressApp.post('/api/uploads/image', (req, res) => {
     upload.single('image')(req, res, async (err) => {
       if (err) {
@@ -64,32 +94,33 @@ function registerUploadRoutes(expressApp) {
       try {
         await authenticateRequest(req);
 
-        if (!req.file) {
+        if (!req.file?.buffer) {
           return res.status(400).json({ error: 'Campo "image" requerido (multipart/form-data)' });
         }
 
-        const base = getPublicBase(req);
-        const url = `${base}/uploads/${req.file.filename}`;
+        const result = await uploadBufferToBucket(req.file.buffer, {
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype
+        });
 
         res.status(201).json({
           success: true,
-          url,
-          mimeType: req.file.mimetype,
-          sizeBytes: req.file.size,
-          fileName: req.file.originalname || req.file.filename
+          url: result.url,
+          key: result.key,
+          mimeType: result.mimeType,
+          sizeBytes: result.sizeBytes,
+          fileName: result.fileName
         });
-      } catch (authErr) {
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-          fs.unlinkSync(req.file.path);
-        }
-        res.status(authErr.status || 500).json({ error: authErr.message });
+      } catch (uploadErr) {
+        logger.error('upload_failed', { error: uploadErr.message, status: uploadErr.status });
+        res.status(uploadErr.status || 500).json({ error: uploadErr.message });
       }
     });
   });
 }
 
 module.exports = {
-  UPLOAD_DIR,
   registerUploadRoutes,
-  getPublicBase
+  uploadBufferToBucket,
+  BUCKET_FOLDER
 };

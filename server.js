@@ -1,13 +1,16 @@
 const express = require('express');
-const path = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const mongoose = require('mongoose');
-require('dotenv').config(); // Load .env variables
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+
+// Validación estricta antes de cargar el resto (sin defaults para vars críticas)
+const { MONGODB_URI } = require('./src/lib/env');
+const { connectMongo, registerShutdownHandlers } = require('./src/lib/mongo');
+const logger = require('./src/lib/logger');
 
 const PORT = process.env.PORT || 4000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chat_multiservicio';
 
 const { initPublicBaseUrl } = require('./src/lib/publicUrl');
 initPublicBaseUrl(PORT);
@@ -21,48 +24,33 @@ const {
 } = require('./src/lib/integrations');
 const {
   DELIVERY_CHANNELS,
+  JOIN_CHAT_MESSAGE_LIMIT,
   recordMessage,
   markMessagesReadByCustomer,
   getConversationHistory,
   mapMessagesToData,
-  fetchMessagesForConversation
+  fetchRecentMessagesForConversation,
+  fetchOlderMessagesForConversation
 } = require('./src/lib/messageStore');
 const { validateMessagePayload } = require('./src/lib/messageHelpers');
 const {
   createCorsOriginHandler,
   isOriginAllowedForPlatform,
   syncMaracaiboOriginsOnStartup,
+  invalidatePlatformOriginsCache,
   logShareUrls
 } = require('./src/lib/cors');
-const { registerUploadRoutes, UPLOAD_DIR } = require('./src/lib/uploads');
+const { registerUploadRoutes } = require('./src/lib/uploads');
+const { AGENTS_DASHBOARD_ROOM } = require('./src/lib/socketRooms');
+const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('./src/lib/throttle');
 
-// Función para conectar a la DB con fallback in-memory y auto-siembra
-async function connectDB() {
-  let uri = MONGODB_URI;
+const SEND_MESSAGE_MAX_PER_MIN = Number(process.env.SEND_MESSAGE_MAX_PER_MIN) || 10;
 
-  try {
-    // Intentar conexión a la DB local o configurada
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 2000 });
-    console.log('✅ Conectado a MongoDB local/remoto');
-  } catch (err) {
-    console.log('⚠️ MongoDB local no está corriendo en 27017. Levantando MongoDB en memoria...');
-    try {
-      const { MongoMemoryServer } = require('mongodb-memory-server');
-      const mongoServer = await MongoMemoryServer.create();
-      uri = mongoServer.getUri();
-      await mongoose.connect(uri);
-      console.log(`✅ Conectado a MongoDB en memoria: ${uri}`);
-    } catch (memErr) {
-      console.error('❌ Error fatal al iniciar MongoDB en memoria:', memErr);
-      process.exit(1);
-    }
-  }
-
-  // Auto-siembra si la base de datos está vacía
+async function seedPlatformsIfEmpty() {
   try {
     const platformCount = await Platform.countDocuments();
     if (platformCount === 0) {
-      console.log('🌱 Base de datos vacía. Sembrando plataformas de prueba...');
+      logger.info('auto_seed_platforms_start');
       const testPlatforms = [
         {
           name: 'Servicios Maracaibo',
@@ -76,20 +64,24 @@ async function connectDB() {
         }
       ];
       await Platform.insertMany(testPlatforms);
-      console.log('✅ Plataformas sembradas automáticamente.');
+      logger.info('auto_seed_platforms_done');
     }
     await syncMaracaiboOriginsOnStartup();
+    invalidatePlatformOriginsCache();
   } catch (seedErr) {
-    console.error('❌ Error en auto-siembra:', seedErr);
+    logger.error('auto_seed_failed', { error: seedErr.message });
   }
 }
-
-connectDB();
 
 const expressApp = express();
 const server = http.createServer(expressApp);
 
-  // CORS: Express (widget.js, API REST, socket.io.js)
+  expressApp.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+  }));
+
+  // CORS: Express (widget.js, API REST, socket.io.js) — permisivo según .env / plataformas
   const corsOriginHandler = createCorsOriginHandler();
   expressApp.use(cors({
     origin: corsOriginHandler,
@@ -98,13 +90,41 @@ const server = http.createServer(expressApp);
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key']
   }));
 
-  expressApp.use(express.json());
+  expressApp.use(express.json({ limit: '1mb' }));
+
+  const integrationsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.RATE_LIMIT_INTEGRATIONS) || 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiadas peticiones. Intente de nuevo en un minuto.' }
+  });
+
+  const conversationsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.RATE_LIMIT_CONVERSATIONS) || 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiadas peticiones. Intente de nuevo en un minuto.' }
+  });
+
+  const uploadsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: Number(process.env.RATE_LIMIT_UPLOADS) || 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Demasiadas subidas. Intente de nuevo en un minuto.' }
+  });
+
+  expressApp.use('/api/integrations', integrationsLimiter);
+  expressApp.use('/api/conversations', conversationsLimiter);
+  expressApp.use('/api/uploads', uploadsLimiter);
 
   // ============================================
-  // Endpoints REST requeridos
+  // Endpoints REST (monitoreo / agentes)
   // ============================================
 
-  // GET /api/conversations: Historial de chats activos para el dashboard de agentes
+  // GET /api/conversations: Conversaciones activas (respuesta = array, mismo contrato)
   expressApp.get('/api/conversations', async (req, res) => {
     try {
       const conversations = await Conversation.find({ status: 'active' })
@@ -171,23 +191,24 @@ const server = http.createServer(expressApp);
     }
   });
 
-  // Subida de imágenes (archivos en disco; MongoDB solo guarda URL)
+  // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
-  expressApp.use('/uploads', express.static(UPLOAD_DIR));
 
-  // Servir contenido estático (widget.js y assets) desde la carpeta public
+  // Servir contenido estático (widget.js y demos) desde public/
   expressApp.use(express.static('public'));
-  // No se delegan rutas a Next.js aquí, el dashboard corre por separado
 
   // ============================================
-  // Configuración de Socket.io (Conexión Súper Persistente)
+  // Configuración de Socket.io
   // ============================================
+  const recoveryMs =
+    Number(process.env.SOCKET_RECOVERY_MS) ||
+    (process.env.NODE_ENV === 'production' ? 30 * 1000 : 2 * 60 * 1000);
+
   const io = new Server(server, {
-    // Habilitar Connection State Recovery
-    // Si el cliente se desconecta brevemente, el servidor retiene su búfer y se recupera el estado sin perder paquetes.
     connectionStateRecovery: {
-      maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutos
-      skipMiddlewares: true
+      maxDisconnectionDuration: recoveryMs,
+      // Re-validar auth de plataforma (/client) tras recovery
+      skipMiddlewares: false
     },
     cors: {
       origin: corsOriginHandler,
@@ -196,11 +217,9 @@ const server = http.createServer(expressApp);
     }
   });
 
-  // Declaración de namespaces separados para Clientes y Agentes
   const clientNamespace = io.of('/client');
   const agentNamespace = io.of('/agent');
 
-  // API del conector (Tickets ↔ Maracaibo)
   registerIntegrationRoutes(expressApp, io);
 
   // Middleware de validación de API Key y CORS para Clientes
@@ -223,7 +242,7 @@ const server = http.createServer(expressApp);
 
       // Validar origen según plataforma + reglas globales (VPN, .env)
       if (origin && !isOriginAllowedForPlatform(origin, platform)) {
-        console.warn(`⛔ Socket CORS bloqueado: ${origin} (plataforma: ${platform.name})`);
+        logger.warn('socket_cors_blocked', { origin, platform: platform.name });
         return nextMiddleware(new Error(`Autenticación de origen bloqueada por CORS: ${origin}`));
       }
 
@@ -242,57 +261,106 @@ const server = http.createServer(expressApp);
   // Eventos: Clientes (/client)
   // ============================================
   clientNamespace.on('connection', (socket) => {
-    console.log(`🔌 Cliente "${socket.customerName}" conectado desde [${socket.platform.name}]`);
+    logger.info('client_connected', {
+      customerName: socket.customerName,
+      platform: socket.platform.name
+    });
 
-    // Evento: join_chat - Crea o recupera una conversación persistente
     socket.on('join_chat', async (callback) => {
       try {
         const conversation = await resolveConversationForClient(socket, socket.ticketId);
+        const roomId = conversation._id.toString();
 
-        socket.join(conversation._id.toString());
-        socket.conversationId = conversation._id.toString();
+        socket.join(roomId);
+        socket.conversationId = roomId;
 
-        const { messages } = await fetchMessagesForConversation(conversation._id);
-
-        // El ciudadano abrió el chat: marcar mensajes del agente como vistos
-        await markMessagesReadByCustomer(conversation._id, io);
+        const messages = await fetchRecentMessagesForConversation(conversation._id);
+        const mapped = mapMessagesToData(messages);
 
         if (typeof callback === 'function') {
           callback({
             success: true,
             conversationId: conversation._id,
             externalTicketId: conversation.externalTicketId || null,
-            messages: mapMessagesToData(messages)
+            messages: mapped,
+            hasMore: mapped.length >= JOIN_CHAT_MESSAGE_LIMIT
           });
         }
 
-        // Marcar presencia como online en MongoDB
-        await Conversation.findByIdAndUpdate(conversation._id, { isOnline: true });
+        // Presencia + lecturas + emit en paralelo (después del callback = join más rápido)
+        const populatePromise =
+          conversation.platformId && typeof conversation.platformId === 'object' && conversation.platformId.name
+            ? Promise.resolve(conversation)
+            : conversation.populate('platformId');
 
-        // Notificar globalmente a los agentes en el dashboard para añadir o actualizar la conversación en su lista
-        const populatedConv = await Conversation.findById(conversation._id).populate('platformId');
-        agentNamespace.emit('conversation_updated', populatedConv);
+        const [, populatedConv] = await Promise.all([
+          Conversation.findByIdAndUpdate(conversation._id, { isOnline: true }),
+          populatePromise,
+          markMessagesReadByCustomer(conversation._id, io) // no-op si no hay unread
+        ]);
 
-        // Notificar presencia: el cliente está en línea
+        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', populatedConv);
+
         const presencePayload = {
-          conversationId: conversation._id.toString(),
+          conversationId: roomId,
           online: true,
           customerName: socket.customerName
         };
-        agentNamespace.to(conversation._id.toString()).emit('client_presence', presencePayload);
-        agentNamespace.emit('client_presence_global', presencePayload);
-
+        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('client_presence', presencePayload);
+        agentNamespace.to(roomId).emit('client_presence', presencePayload);
       } catch (err) {
-        console.error('Error en join_chat:', err);
+        logger.error('join_chat_failed', { error: err.message });
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }
       }
     });
 
-    // Evento: send_message - Envía mensaje del cliente al agente
+    socket.on('load_older_messages', async (data, callback) => {
+      try {
+        if (typeof data === 'function') {
+          callback = data;
+          data = {};
+        }
+        const conversationId = socket.conversationId;
+        if (!conversationId) {
+          return callback && callback({ success: false, error: 'No hay conversación activa' });
+        }
+        const before = data?.before;
+        if (!before) {
+          return callback && callback({ success: false, error: 'before (timestamp) es requerido' });
+        }
+
+        const { messages, hasMore } = await fetchOlderMessagesForConversation(
+          conversationId,
+          before,
+          data?.limit || JOIN_CHAT_MESSAGE_LIMIT
+        );
+
+        if (typeof callback === 'function') {
+          callback({
+            success: true,
+            messages: mapMessagesToData(messages),
+            hasMore
+          });
+        }
+      } catch (err) {
+        logger.error('load_older_messages_failed', { error: err.message });
+        if (typeof callback === 'function') {
+          callback({ success: false, error: err.message });
+        }
+      }
+    });
+
     socket.on('send_message', async (data, callback) => {
       try {
+        if (shouldRateLimitSocketEvent(socket, 'send_message', SEND_MESSAGE_MAX_PER_MIN, 60_000)) {
+          return callback && callback({
+            success: false,
+            error: `Límite de mensajes alcanzado (máx ${SEND_MESSAGE_MAX_PER_MIN}/min)`
+          });
+        }
+
         const payload = validateMessagePayload(data);
         if (payload.error) {
           return callback && callback({ success: false, error: payload.error });
@@ -319,7 +387,7 @@ const server = http.createServer(expressApp);
           callback({ success: true, message: result.message });
         }
       } catch (err) {
-        console.error('Error en send_message cliente:', err);
+        logger.error('client_send_message_failed', { error: err.message });
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }
@@ -345,7 +413,7 @@ const server = http.createServer(expressApp);
           callback({ success: true, marked: !!result, ...(result || {}) });
         }
       } catch (err) {
-        console.error('Error en mark_messages_read:', err);
+        logger.error('mark_messages_read_failed', { error: err.message });
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }
@@ -357,6 +425,8 @@ const server = http.createServer(expressApp);
       const conversationId = socket.conversationId;
       if (!conversationId) return;
       const isTyping = !!(data && data.isTyping);
+      if (isTyping && shouldThrottleSocketEvent(socket, 'client_typing', 2000)) return;
+
       const payload = {
         conversationId,
         senderType: 'customer',
@@ -364,7 +434,7 @@ const server = http.createServer(expressApp);
         isTyping
       };
       agentNamespace.to(conversationId).emit('user_typing', payload);
-      agentNamespace.emit('conversation_typing', payload);
+      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_typing', payload);
     });
 
     socket.on('disconnect', (reason) => {
@@ -378,22 +448,24 @@ const server = http.createServer(expressApp);
           isTyping: false
         };
         agentNamespace.to(conversationId).emit('user_typing', typingPayload);
-        agentNamespace.emit('conversation_typing', typingPayload);
+        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_typing', typingPayload);
 
-        // Notificar presencia: el cliente se desconectó
         const presencePayload = {
           conversationId,
           online: false,
           customerName: socket.customerName
         };
+        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('client_presence', presencePayload);
         agentNamespace.to(conversationId).emit('client_presence', presencePayload);
-        agentNamespace.emit('client_presence_global', presencePayload);
 
         // Marcar presencia como offline en MongoDB en segundo plano
         Conversation.findByIdAndUpdate(conversationId, { isOnline: false })
-          .catch(err => console.error('Error al actualizar presencia offline en DB:', err));
+          .catch((err) => logger.error('presence_offline_update_failed', { error: err.message }));
       }
-      console.log(`🔌 Cliente desvinculado: "${socket.customerName}" (Razón: ${reason})`);
+      logger.info('client_disconnected', {
+        customerName: socket.customerName,
+        reason
+      });
     });
   });
 
@@ -401,26 +473,35 @@ const server = http.createServer(expressApp);
   // Eventos: Agentes (/agent)
   // ============================================
   agentNamespace.on('connection', (socket) => {
-    console.log('👷 Agente conectado al Dashboard Central');
+    socket.join(AGENTS_DASHBOARD_ROOM);
+    logger.info('agent_connected');
 
-    // Evento: agent_join - Agente se suscribe a una sala de chat de cliente
     socket.on('agent_join', (data) => {
       const { conversationId } = data;
       if (conversationId) {
-        // Limpiar suscripciones previas para no duplicar flujos de mensajes en salas incorrectas
-        socket.rooms.forEach(room => {
-          if (room !== socket.id && room !== conversationId) {
+        socket.rooms.forEach((room) => {
+          if (
+            room !== socket.id &&
+            room !== conversationId &&
+            room !== AGENTS_DASHBOARD_ROOM
+          ) {
             socket.leave(room);
           }
         });
         socket.join(conversationId);
-        console.log(`👷 Agente escuchando la sala: ${conversationId}`);
+        logger.debug('agent_joined_room', { conversationId });
       }
     });
 
-    // Evento: agent_send_message - Respuesta del agente al cliente
     socket.on('agent_send_message', async (data, callback) => {
       try {
+        if (shouldRateLimitSocketEvent(socket, 'send_message', SEND_MESSAGE_MAX_PER_MIN, 60_000)) {
+          return callback && callback({
+            success: false,
+            error: `Límite de mensajes alcanzado (máx ${SEND_MESSAGE_MAX_PER_MIN}/min)`
+          });
+        }
+
         const { conversationId } = data;
         if (!conversationId) {
           return callback && callback({ success: false, error: 'conversationId es requerido' });
@@ -438,7 +519,7 @@ const server = http.createServer(expressApp);
             messageType: payload.messageType,
             content: payload.content,
             attachment: payload.attachment,
-            senderName: 'Agente (dashboard)',
+            senderName: 'Agente',
             deliveryChannel: DELIVERY_CHANNELS.SOCKET_AGENT
           },
           io
@@ -448,7 +529,7 @@ const server = http.createServer(expressApp);
           callback({ success: true, message: result.message });
         }
       } catch (err) {
-        console.error('Error en agent_send_message:', err);
+        logger.error('agent_send_message_failed', { error: err.message });
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }
@@ -459,6 +540,7 @@ const server = http.createServer(expressApp);
     socket.on('agent_typing', (data) => {
       const { conversationId, isTyping } = data || {};
       if (!conversationId) return;
+      if (isTyping && shouldThrottleSocketEvent(socket, 'agent_typing', 2000)) return;
       clientNamespace.to(conversationId).emit('user_typing', {
         conversationId,
         senderType: 'agent',
@@ -487,13 +569,13 @@ const server = http.createServer(expressApp);
         agentNamespace.to(conversationId).emit('conversation_closed', { conversationId });
         
         // Notificar cambio de lista general (los agentes remueven o archivan el chat)
-        agentNamespace.emit('conversation_updated', conversation);
+        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', conversation);
 
         if (typeof callback === 'function') {
           callback({ success: true, conversation });
         }
       } catch (err) {
-        console.error('Error en close_conversation:', err);
+        logger.error('close_conversation_failed', { error: err.message });
         if (typeof callback === 'function') {
           callback({ success: false, error: err.message });
         }
@@ -501,23 +583,43 @@ const server = http.createServer(expressApp);
     });
 
     socket.on('disconnect', () => {
-      console.log('👷 Agente desconectado del Dashboard');
+      logger.info('agent_disconnected');
     });
   });
 
-  server.listen(PORT, '0.0.0.0', (err) => {
-    if (err) {
-      if (err.code === 'EADDRINUSE') {
-        console.error(`❌ Puerto ${PORT} en uso. Detén el proceso anterior: kill $(lsof -t -i :${PORT})`);
-      }
-      throw err;
-    }
-    console.log(`🚀 Conector de chat listo en http://0.0.0.0:${PORT}`);
-    const publicBase = initPublicBaseUrl(PORT);
+  async function bootstrap() {
+    await connectMongo(MONGODB_URI);
+    await seedPlatformsIfEmpty();
+
+    await new Promise((resolve, reject) => {
+      server.listen(PORT, '0.0.0.0', (err) => {
+        if (err) {
+          if (err.code === 'EADDRINUSE') {
+            logger.error('port_in_use', { port: PORT });
+          }
+          return reject(err);
+        }
+        resolve();
+      });
+    });
+
+    initPublicBaseUrl(PORT);
     logShareUrls(PORT);
-    console.log(`🖼️  URLs de imágenes:  ${publicBase}/uploads/...`);
-    if (!process.env.PUBLIC_BASE_URL) {
-      console.log('   (auto-detectada por IP LAN; fija con PUBLIC_BASE_URL en .env si cambia el Wi‑Fi)');
+    logger.info('server_ready', {
+      port: PORT,
+      bucketFolder: process.env.BUCKET_FOLDER,
+      nodeEnv: process.env.NODE_ENV || 'development'
+    });
+
+    // PM2 wait_ready: el proceso está listo para recibir tráfico
+    if (typeof process.send === 'function') {
+      process.send('ready');
     }
-    console.log('');
+
+    registerShutdownHandlers(server, io);
+  }
+
+  bootstrap().catch((err) => {
+    logger.error('bootstrap_failed', { error: err.message });
+    process.exit(1);
   });

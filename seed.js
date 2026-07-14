@@ -1,13 +1,13 @@
+const { MONGODB_URI } = require('./src/lib/env');
+const { getMongooseOptions } = require('./src/lib/mongo');
 const mongoose = require('mongoose');
 const Platform = require('./src/models/Platform');
 const Conversation = require('./src/models/Conversation');
 const Message = require('./src/models/Message');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/chat_multiservicio';
-
 async function seed() {
   try {
-    await mongoose.connect(MONGODB_URI);
+    await mongoose.connect(MONGODB_URI, getMongooseOptions());
     console.log('🌱 Conectado a MongoDB para inicializar datos...');
 
     // Limpiar colecciones previas

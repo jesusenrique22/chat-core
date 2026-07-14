@@ -13,12 +13,9 @@
 # testing
 /coverage
 
-# next.js
-/.next/
-/out/
-
-# production
+# production / logs
 /build
+/logs
 
 # misc
 .DS_Store
@@ -36,12 +33,5 @@ yarn-error.log*
 .env.*.local
 !.env.example
 
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# uploaded chat images (stored on disk, not in git)
+# legacy local uploads (ya no se usan; imágenes van al bucket)
 /uploads

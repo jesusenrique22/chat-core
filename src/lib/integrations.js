@@ -2,6 +2,7 @@
  * Lógica del conector: validación de plataformas, enlace ticket ↔ chat, mensajes.
  */
 
+const mongoose = require('mongoose');
 const Platform = require('../models/Platform');
 const Conversation = require('../models/Conversation');
 const {
@@ -13,6 +14,32 @@ const {
   findConversationByTicketId,
   getTicketHistory
 } = require('./messageStore');
+const { AGENTS_DASHBOARD_ROOM } = require('./socketRooms');
+const { getUptimeSec, getStartedAtIso } = require('./runtime');
+const logger = require('./logger');
+
+const MONGO_STATES = {
+  0: 'disconnected',
+  1: 'connected',
+  2: 'connecting',
+  3: 'disconnecting'
+};
+
+async function checkMongoHealth() {
+  const readyState = mongoose.connection.readyState;
+  const state = MONGO_STATES[readyState] || `unknown(${readyState})`;
+
+  if (readyState !== 1 || !mongoose.connection.db) {
+    return { ok: false, state };
+  }
+
+  try {
+    await mongoose.connection.db.admin().ping();
+    return { ok: true, state };
+  } catch (err) {
+    return { ok: false, state, error: err.message };
+  }
+}
 
 const MARACAIBO_PLATFORM_NAMES = ['servicios maracaibo'];
 
@@ -256,7 +283,7 @@ async function deliverAgentMessage(
   );
 
   const populatedConv = await Conversation.findById(conversation._id).populate('platformId');
-  io.of('/agent').emit('conversation_updated', populatedConv);
+  io.of('/agent').to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', populatedConv);
 
   return { message: result.message, conversation: populatedConv };
 }
@@ -322,7 +349,7 @@ async function closeConversationByTicketId({ ticketId, closedBy, reason }, io) {
     const agentNamespace = io.of('/agent');
     clientNamespace.to(roomId).emit('conversation_closed', { conversationId: roomId });
     agentNamespace.to(roomId).emit('conversation_closed', { conversationId: roomId });
-    agentNamespace.emit('conversation_updated', populatedConv);
+    agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', populatedConv);
   }
 
   return populatedConv;
@@ -345,7 +372,7 @@ function registerIntegrationRoutes(expressApp, io) {
         metadata: metadata || {}
       });
 
-      io.of('/agent').emit('conversation_updated', conversation);
+      io.of('/agent').to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', conversation);
 
       res.status(201).json({
         success: true,
@@ -465,12 +492,26 @@ function registerIntegrationRoutes(expressApp, io) {
     }
   });
 
-  expressApp.get('/api/integrations/health', (req, res) => {
-    res.json({
-      ok: true,
+  // Campos nuevos son aditivos; ok/service/version se mantienen.
+  expressApp.get('/api/integrations/health', async (req, res) => {
+    const mongo = await checkMongoHealth();
+    const healthy = mongo.ok;
+    const payload = {
+      ok: healthy,
       service: 'chat-multiservicio-connector',
-      version: '1.0.0'
-    });
+      version: '1.0.0',
+      uptimeSec: getUptimeSec(),
+      startedAt: getStartedAtIso(),
+      mongo,
+      timestamp: new Date().toISOString()
+    };
+
+    if (!healthy) {
+      logger.warn('health_check_unhealthy', { mongo });
+      return res.status(503).json(payload);
+    }
+
+    return res.json(payload);
   });
 }
 

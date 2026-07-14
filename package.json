@@ -3,23 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 0.0.0.0 -p 3000",
     "backend": "node server.js",
+    "start": "NODE_ENV=production node server.js",
+    "start:pm2": "pm2 start ecosystem.config.js",
+    "reload:pm2": "pm2 reload ecosystem.config.js --update-env",
     "test:connector": "bash scripts/test-connector.sh",
-    "build": "next build",
-    "start": "NODE_ENV=production node server.js"
+    "seed": "node seed.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
     "mongoose": "^9.6.2",
     "multer": "^2.1.1",
-    "next": "16.2.6",
-    "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3"
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.1.0"

@@ -166,6 +166,25 @@
       border-radius: 8px;
       text-align: center;
     }
+    #chat-widget-load-older {
+      align-self: center;
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #94a3b8;
+      font-size: 0.75rem;
+      padding: 6px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      margin-bottom: 4px;
+    }
+    #chat-widget-load-older:hover {
+      color: #e2e8f0;
+      border-color: rgba(37, 99, 235, 0.5);
+    }
+    #chat-widget-load-older:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
     .chat-bubble-time {
       display: block;
       font-size: 0.65rem;
@@ -418,6 +437,10 @@
   let typingActive = false;
   let pendingImageFile = null;
   let pendingImagePreviewUrl = null;
+  let readDebounceTimer = null;
+  let oldestMessageTs = null;
+  let hasMoreOlder = false;
+  let loadingOlder = false;
 
   function updateSendButtonState() {
     const canSend = !!(pendingImageFile || chatInput.value.trim());
@@ -497,17 +520,94 @@
     document.head.appendChild(script);
   }
 
+  function scheduleMarkMessagesRead() {
+    if (!socket || !socket.connected) return;
+    clearTimeout(readDebounceTimer);
+    readDebounceTimer = setTimeout(() => {
+      if (socket && socket.connected) {
+        socket.emit("mark_messages_read", {});
+      }
+    }, 3000);
+  }
+
+  function ensureLoadOlderButton() {
+    let btn = document.getElementById("chat-widget-load-older");
+    if (!hasMoreOlder) {
+      if (btn) btn.remove();
+      return;
+    }
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "chat-widget-load-older";
+      btn.textContent = "Cargar mensajes anteriores";
+      btn.addEventListener("click", loadOlderMessages);
+      const first = chatBody.firstChild;
+      if (first) chatBody.insertBefore(btn, first);
+      else chatBody.appendChild(btn);
+    }
+    btn.disabled = loadingOlder;
+    btn.textContent = loadingOlder ? "Cargando…" : "Cargar mensajes anteriores";
+  }
+
+  function trackOldestFromMessages(messages) {
+    if (!messages || !messages.length) {
+      oldestMessageTs = null;
+      return;
+    }
+    const first = messages[0];
+    oldestMessageTs = first.timestamp || null;
+  }
+
+  function loadOlderMessages() {
+    if (!socket || !socket.connected || !oldestMessageTs || loadingOlder) return;
+    loadingOlder = true;
+    ensureLoadOlderButton();
+    const prevHeight = chatBody.scrollHeight;
+    socket.emit("load_older_messages", { before: oldestMessageTs }, (res) => {
+      loadingOlder = false;
+      if (res && res.success) {
+        const older = res.messages || [];
+        hasMoreOlder = !!res.hasMore;
+        if (older.length) {
+          trackOldestFromMessages(older);
+          let cursor = document.getElementById("chat-widget-load-older");
+          older.forEach((msg) => {
+            const bubble = buildMessageBubble(msg);
+            if (!bubble) return;
+            if (cursor) {
+              cursor.after(bubble);
+              cursor = bubble;
+            } else {
+              chatBody.insertBefore(bubble, chatBody.firstChild);
+              cursor = bubble;
+            }
+          });
+          chatBody.scrollTop = chatBody.scrollHeight - prevHeight;
+        }
+      } else {
+        console.error("❌ Error cargando historial anterior:", res?.error);
+      }
+      ensureLoadOlderButton();
+    });
+  }
+
   function loadHistoryFromServer() {
     if (!socket || !socket.connected) return;
     socket.emit("join_chat", (res) => {
       if (res && res.success) {
+        hasMoreOlder = !!res.hasMore;
         chatBody.innerHTML = `
           <div class="chat-bubble agent">
             Hola ${customerName}, ¿en qué podemos ayudarte hoy?
           </div>
         `;
-        (res.messages || []).forEach((msg) => appendMessage(msg));
+        const msgs = res.messages || [];
+        trackOldestFromMessages(msgs);
+        ensureLoadOlderButton();
+        msgs.forEach((msg) => appendMessage(msg));
         chatBody.scrollTop = chatBody.scrollHeight;
+        scheduleMarkMessagesRead();
       } else {
         console.error("❌ Error al unirse a la sala de chat:", res?.error);
       }
@@ -523,9 +623,9 @@
       auth: authPayload,
       transports: ["websocket", "polling"],
       reconnection: true,
+      reconnectionAttempts: 20,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      reconnectionAttempts: Infinity, // Reconectar indefinidamente
+      reconnectionDelayMax: 10000,
     });
 
     socket.on("connect", () => {
@@ -539,12 +639,11 @@
       }
     });
 
-    // Escuchar respuestas de los agentes
     socket.on("new_message", (message) => {
       showAgentTyping(null, false);
       appendMessage(message);
-      if (widgetContainer.style.display === "flex") {
-        socket.emit("mark_messages_read", { messageId: message._id });
+      if (widgetContainer.style.display === "flex" && message.senderType === "agent") {
+        scheduleMarkMessagesRead();
       }
     });
 
@@ -672,10 +771,9 @@
     });
   });
 
-  // Añadir mensajes burbuja en la UI
-  function appendMessage(msg) {
+  function buildMessageBubble(msg) {
     const msgId = msg._id || msg.timestamp;
-    if (document.getElementById(`widget-msg-${msgId}`)) return;
+    if (document.getElementById(`widget-msg-${msgId}`)) return null;
 
     const bubble = document.createElement("div");
     bubble.id = `widget-msg-${msgId}`;
@@ -734,6 +832,12 @@
       bubble.appendChild(timeEl);
     }
 
+    return bubble;
+  }
+
+  function appendMessage(msg) {
+    const bubble = buildMessageBubble(msg);
+    if (!bubble) return;
     chatBody.appendChild(bubble);
     chatBody.scrollTop = chatBody.scrollHeight;
   }
