@@ -76,6 +76,18 @@ async function seedPlatformsIfEmpty() {
 const expressApp = express();
 const server = http.createServer(expressApp);
 
+  // nginx / proxy → X-Forwarded-For. Obligatorio para express-rate-limit (IP real del cliente).
+  // 1 = un hop (nginx en el mismo droplet). Ajusta TRUST_PROXY_HOPS si hay más proxies.
+  const trustProxyHops = process.env.TRUST_PROXY_HOPS;
+  expressApp.set(
+    'trust proxy',
+    trustProxyHops === 'false' || trustProxyHops === '0'
+      ? false
+      : Number(trustProxyHops) > 0
+        ? Number(trustProxyHops)
+        : 1
+  );
+
   expressApp.use(helmet({
     contentSecurityPolicy: false,
     crossOriginResourcePolicy: { policy: 'cross-origin' }
