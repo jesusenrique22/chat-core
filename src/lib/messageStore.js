@@ -100,10 +100,15 @@ async function recordMessage(
     const agentNamespace = io.of('/agent');
 
     if (senderType === 'customer') {
+      // Room + broadcast global: el panel de tickets escucha new_message
+      // aunque el agente no haya hecho join de esa conversación.
       agentNamespace.to(roomId).emit('new_message', messageData);
+      // Sala dashboard: agentes del panel reciben el mensaje sin abrir el chat.
+      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('new_message', messageData);
       agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_message_received', {
         conversationId: roomId,
-        lastMessage: preview
+        lastMessage: preview,
+        externalTicketId: conversation.externalTicketId || null,
       });
     } else {
       clientNamespace.to(roomId).emit('new_message', messageData);
@@ -115,11 +120,8 @@ async function recordMessage(
     }
   }
 
-  if (
-    conversation.externalTicketId &&
-    senderType === 'customer' &&
-    isMaracaiboConversation(conversation)
-  ) {
+  // Webhook al panel de tickets: cualquier ciudadano con ticket enlazado.
+  if (conversation.externalTicketId && senderType === 'customer') {
     const ticketId = conversation.externalTicketId;
     let customMessage = `Hey, tienes un mensaje en el ticket ${ticketId}`;
     if (messageType === 'text' && content) {
@@ -128,10 +130,16 @@ async function recordMessage(
       customMessage = `Hey, tienes una imagen nueva en el ticket ${ticketId}`;
     }
 
+    logger.info('ticket_notify_queued', {
+      ticketId,
+      maracaibo: isMaracaiboConversation(conversation),
+    });
     scheduleAsync(
       () => sendExternalNotification(ticketId, 'mensaje', null, customMessage),
       `notificar ticket ${ticketId}`
     );
+  } else if (senderType === 'customer') {
+    logger.warn('customer_message_without_ticket', { conversationId: String(convId) });
   }
 
   return { message: messageData, conversation };
