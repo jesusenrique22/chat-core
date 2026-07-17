@@ -75,10 +75,14 @@ async function recordMessage(
     const agentNamespace = io.of('/agent');
 
     if (senderType === 'customer') {
+      // Room + broadcast global: el panel de tickets escucha new_message
+      // aunque el agente no haya hecho join de esa conversación.
       agentNamespace.to(roomId).emit('new_message', messageData);
+      agentNamespace.emit('new_message', messageData);
       agentNamespace.emit('conversation_message_received', {
         conversationId: roomId,
-        lastMessage: preview
+        lastMessage: preview,
+        externalTicketId: conversation.externalTicketId || null,
       });
     } else {
       clientNamespace.to(roomId).emit('new_message', messageData);
@@ -90,35 +94,24 @@ async function recordMessage(
     }
   }
 
-  // Disparar notificación externa al sistema de tickets solo si el mensaje proviene del ciudadano (customer)
+  // Webhook al sistema de tickets: todo mensaje de ciudadano con ticket enlazado.
   if (conversation.externalTicketId && senderType === 'customer') {
-    let isMaracaibo = false;
-    try {
-      let platform = conversation.platformId;
-      if (platform && typeof platform === 'object' && platform.name) {
-        isMaracaibo = platform.name.toLowerCase().includes('maracaibo');
-      } else if (platform) {
-        // Si no está poblado, cargarlo de la base de datos
-        const platformDoc = await Platform.findById(platform);
-        if (platformDoc) {
-          isMaracaibo = platformDoc.name.toLowerCase().includes('maracaibo');
-        }
-      }
-    } catch (platformErr) {
-      console.error('[Notificación] Error al verificar plataforma:', platformErr.message);
+    let customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}`;
+    if (messageType === 'text' && content) {
+      customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}: "${content}"`;
+    } else if (messageType === 'image') {
+      customMessage = `Hey, tienes una imagen nueva en el ticket ${conversation.externalTicketId}`;
     }
 
-    if (isMaracaibo) {
-      let customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}`;
-      if (messageType === 'text' && content) {
-        customMessage = `Hey, tienes un mensaje en el ticket ${conversation.externalTicketId}: "${content}"`;
-      } else if (messageType === 'image') {
-        customMessage = `Hey, tienes una imagen nueva en el ticket ${conversation.externalTicketId}`;
-      }
-
-      sendExternalNotification(conversation.externalTicketId, 'mensaje', null, customMessage)
-        .catch((err) => console.error(`[Notificación] Error asíncrono al notificar ticket ${conversation.externalTicketId}:`, err.message));
-    }
+    console.log(
+      `[Notificación] Ciudadano → ticket ${conversation.externalTicketId} (webhook + socket broadcast)`,
+    );
+    sendExternalNotification(conversation.externalTicketId, 'mensaje', null, customMessage)
+      .catch((err) => console.error(`[Notificación] Error asíncrono al notificar ticket ${conversation.externalTicketId}:`, err.message));
+  } else if (senderType === 'customer') {
+    console.warn(
+      `[Notificación] Mensaje de ciudadano SIN externalTicketId (conv ${convId}) — no se notifica al panel`,
+    );
   }
 
   return { message: messageData, conversation };
@@ -299,7 +292,7 @@ async function getTicketHistory(ticketId, query = {}) {
  * Tipos: mensajes_leidos (todos) | mensaje_leido (uno).
  */
 async function sendReadReceiptNotification({ ticketId, conversationId, readAt, messageId }) {
-  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
+  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez-1.onrender.com/notifications/ticket';
   const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
   const type = messageId ? 'mensaje_leido' : 'mensajes_leidos';
 
@@ -342,7 +335,7 @@ async function sendReadReceiptNotification({ ticketId, conversationId, readAt, m
  * No arroja excepciones para evitar romper el flujo principal del chat si el servidor de notificaciones falla.
  */
 async function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
-  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez.onrender.com/notifications/ticket';
+  const url = process.env.NOTIFICATIONS_API_URL || 'https://ticketsotravez-1.onrender.com/notifications/ticket';
   const apiKey = process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026';
   
   const messageText = customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`;
