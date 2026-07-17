@@ -104,6 +104,17 @@ const server = http.createServer(expressApp);
 
   expressApp.use(express.json({ limit: '1mb' }));
 
+  // Health / raíz: este servicio es solo API (sin HTML). Evita el "Cannot GET /" confuso.
+  const healthPayload = () => ({
+    ok: true,
+    service: 'chat-core',
+    status: 'live',
+    notificationsWebhook: process.env.NOTIFICATIONS_API_URL || null,
+    time: new Date().toISOString(),
+  });
+  expressApp.get('/', (_req, res) => res.status(200).json(healthPayload()));
+  expressApp.get('/health', (_req, res) => res.status(200).json(healthPayload()));
+
   const integrationsLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: Number(process.env.RATE_LIMIT_INTEGRATIONS) || 100,
