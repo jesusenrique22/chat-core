@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const compression = require('compression');
 
 // Validación estricta antes de cargar el resto (sin defaults para vars críticas)
 const { MONGODB_URI } = require('./src/lib/env');
@@ -102,7 +103,9 @@ const server = http.createServer(expressApp);
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key']
   }));
 
+  expressApp.use(compression());
   expressApp.use(express.json({ limit: '1mb' }));
+  expressApp.use(express.urlencoded({ limit: '1mb', extended: true }));
 
   // Health / raíz: este servicio es solo API (sin HTML). Evita el "Cannot GET /" confuso.
   const healthPayload = () => ({
@@ -152,7 +155,8 @@ const server = http.createServer(expressApp);
     try {
       const conversations = await Conversation.find({ status: 'active' })
         .populate('platformId')
-        .sort({ updatedAt: -1 });
+        .sort({ updatedAt: -1 })
+        .lean();
       res.json(conversations);
     } catch (err) {
       res.status(500).json({ error: err.message });

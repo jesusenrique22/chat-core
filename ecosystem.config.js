@@ -3,8 +3,8 @@ module.exports = {
     {
       name: 'chat-backend',
       script: 'server.js',
-      instances: 1,
-      exec_mode: 'fork',
+      instances: process.env.PM2_INSTANCES || 'max',
+      exec_mode: process.env.PM2_EXEC_MODE || 'cluster',
       max_memory_restart: process.env.PM2_MAX_MEMORY || '512M',
 
       // Reload más limpio: espera "ready" y da tiempo a cerrar WS/Mongo
