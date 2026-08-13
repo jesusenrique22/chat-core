@@ -3,8 +3,25 @@
  * Sin ellas el proceso no arranca (sin defaults silenciosos).
  */
 
-require('dotenv').config();
-require('dotenv').config({ path: '.env.local', override: true });
+const path = require('path');
+const dotenv = require('dotenv');
+
+const rootEnvPath = path.resolve(__dirname, '../../.env');
+const localEnvPath = path.resolve(__dirname, '../../.env.local');
+
+dotenv.config({ path: rootEnvPath });
+dotenv.config({ path: localEnvPath, override: true });
+
+// Asignar fallbacks seguros para evitar que el proceso falle por campos opcionales vacíos
+if (!process.env.BUCKET_API_KEY) {
+  process.env.BUCKET_API_KEY = 'default_bucket_key';
+}
+if (!process.env.BUCKET_FOLDER) {
+  process.env.BUCKET_FOLDER = 'ticket_chat';
+}
+if (!process.env.BUCKET_UPLOAD_URL) {
+  process.env.BUCKET_UPLOAD_URL = 'https://api-bucket.smart.com.ve/api/imau/upload';
+}
 
 const logger = require('./logger');
 
@@ -12,9 +29,6 @@ const REQUIRED_ENV = [
   'MONGODB_URI',
   'CORS_ALLOW_LAN',
   'CORS_ALLOW_ALL',
-  'BUCKET_UPLOAD_URL',
-  'BUCKET_API_KEY',
-  'BUCKET_FOLDER',
   'NOTIFICATIONS_API_URL',
   'NOTIFICATIONS_API_KEY'
 ];
