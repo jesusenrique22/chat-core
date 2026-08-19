@@ -42,7 +42,9 @@ const {
   logShareUrls
 } = require('./src/lib/cors');
 const { registerUploadRoutes } = require('./src/lib/uploads');
-const { AGENTS_DASHBOARD_ROOM } = require('./src/lib/socketRooms');
+const { AGENTS_DASHBOARD_ROOM, getDepartmentRoom } = require('./src/lib/socketRooms');
+const { seedDepartmentsIfEmpty } = require('./src/lib/appointments');
+const { registerAppointmentRoutes } = require('./src/lib/appointmentRoutes');
 const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('./src/lib/throttle');
 
 const SEND_MESSAGE_MAX_PER_MIN = Number(process.env.SEND_MESSAGE_MAX_PER_MIN) || 10;
@@ -245,6 +247,7 @@ const server = http.createServer(expressApp);
   const agentNamespace = io.of('/agent');
 
   registerIntegrationRoutes(expressApp, io);
+  registerAppointmentRoutes(expressApp, agentNamespace, clientNamespace);
 
   // Middleware de validación de API Key y CORS para Clientes
   clientNamespace.use(async (socket, nextMiddleware) => {
@@ -507,13 +510,34 @@ const server = http.createServer(expressApp);
           if (
             room !== socket.id &&
             room !== conversationId &&
-            room !== AGENTS_DASHBOARD_ROOM
+            room !== AGENTS_DASHBOARD_ROOM &&
+            !room.startsWith('dept-')
           ) {
             socket.leave(room);
           }
         });
         socket.join(conversationId);
         logger.debug('agent_joined_room', { conversationId });
+      }
+    });
+
+    // Unir al Jefe de Departamento a la sala de su departamento CPU
+    socket.on('join_department', (data) => {
+      const { departmentId } = data || {};
+      if (departmentId) {
+        const deptRoom = getDepartmentRoom(departmentId);
+        socket.join(deptRoom);
+        logger.info('agent_joined_department_room', { departmentId, deptRoom });
+      }
+    });
+
+    // Salir de la sala de departamento (al cambiar de departamento en el selector)
+    socket.on('leave_department', (data) => {
+      const { departmentId } = data || {};
+      if (departmentId) {
+        const deptRoom = getDepartmentRoom(departmentId);
+        socket.leave(deptRoom);
+        logger.info('agent_left_department_room', { departmentId, deptRoom });
       }
     });
 
@@ -614,6 +638,7 @@ const server = http.createServer(expressApp);
   async function bootstrap() {
     await connectMongo(MONGODB_URI);
     await seedPlatformsIfEmpty();
+    await seedDepartmentsIfEmpty();
 
     await new Promise((resolve, reject) => {
       server.listen(PORT, '0.0.0.0', (err) => {

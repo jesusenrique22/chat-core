@@ -13,10 +13,11 @@
 
 require('dotenv').config();
 const http = require('http');
+const https = require('https');
 const ioClient = require('socket.io-client');
 
 const PORT = process.env.PORT || 4001;
-const BASE_URL = `http://localhost:${PORT}`;
+const BASE_URL = process.env.BASE_URL || process.env.CHAT_CONNECTOR_URL || `http://localhost:${PORT}`;
 
 const MARACAIBO_KEY = 'maracaibo_secret_key_2026';
 const TICKETS_KEY = 'tickets_secret_key_2026';
@@ -47,9 +48,10 @@ function logResult(testName, passed, error = null) {
 function makeRequest(path, method = 'GET', headers = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, BASE_URL);
+    const transport = url.protocol === 'https:' ? https : http;
     const options = {
       hostname: url.hostname,
-      port: url.port,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search,
       method: method,
       headers: {
@@ -58,7 +60,7 @@ function makeRequest(path, method = 'GET', headers = {}, body = null) {
       }
     };
 
-    const req = http.request(options, (res) => {
+    const req = transport.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
