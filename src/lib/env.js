@@ -12,7 +12,7 @@ const localEnvPath = path.resolve(__dirname, '../../.env.local');
 dotenv.config({ path: rootEnvPath });
 dotenv.config({ path: localEnvPath, override: true });
 
-// Asignar fallbacks seguros para evitar que el proceso falle por campos opcionales vacíos
+// Asignar fallbacks seguros para evitar que el proceso falle si no se definen variables opcionales/nube
 if (!process.env.BUCKET_API_KEY) {
   process.env.BUCKET_API_KEY = 'default_bucket_key';
 }
@@ -21,6 +21,18 @@ if (!process.env.BUCKET_FOLDER) {
 }
 if (!process.env.BUCKET_UPLOAD_URL) {
   process.env.BUCKET_UPLOAD_URL = 'https://api-bucket.smart.com.ve/api/imau/upload';
+}
+if (!process.env.CORS_ALLOW_LAN) {
+  process.env.CORS_ALLOW_LAN = 'false';
+}
+if (!process.env.CORS_ALLOW_ALL) {
+  process.env.CORS_ALLOW_ALL = 'true';
+}
+if (!process.env.NOTIFICATIONS_API_URL) {
+  process.env.NOTIFICATIONS_API_URL = 'https://ticketsotravez-production.up.railway.app/notifications/ticket';
+}
+if (!process.env.NOTIFICATIONS_API_KEY) {
+  process.env.NOTIFICATIONS_API_KEY = 'tickets_secret_key_2026';
 }
 
 const logger = require('./logger');

@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Copiar manifiestos e instalar dependencias de producción
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 # Copiar código de la aplicación
 COPY . .
