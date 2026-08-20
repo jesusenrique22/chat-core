@@ -73,7 +73,30 @@ function matchesAllowedList(origin, allowedList) {
   return allowedList.some((allowed) => {
     if (allowed === '*') return true;
     if (allowed === origin) return true;
-    return origin.startsWith(allowed);
+    if (origin.startsWith(allowed)) return true;
+
+    // Soporte para patrones con comodín tipo "*.onrender.com" o "https://*.onrender.com"
+    if (allowed.includes('*') && origin) {
+      try {
+        const originUrl = new URL(origin);
+        const host = originUrl.hostname.toLowerCase();
+        let targetPattern = allowed.toLowerCase();
+
+        if (targetPattern.startsWith('http://') || targetPattern.startsWith('https://')) {
+          const patternHost = targetPattern.split('://')[1].split('/')[0];
+          if (patternHost.startsWith('*.')) {
+            const domainSuffix = patternHost.slice(2);
+            return host === domainSuffix || host.endsWith('.' + domainSuffix);
+          }
+        } else if (targetPattern.startsWith('*.')) {
+          const domainSuffix = targetPattern.slice(2);
+          return host === domainSuffix || host.endsWith('.' + domainSuffix);
+        }
+      } catch (e) {
+        // Ignorar errores de formateo de URL
+      }
+    }
+    return false;
   });
 }
 
@@ -119,6 +142,8 @@ async function syncMaracaiboOriginsOnStartup() {
     'http://127.0.0.1:3000',
     `http://${lanIp}:4000`,
     `http://${lanIp}:3000`,
+    '*.onrender.com',
+    'https://*.onrender.com',
     ...extra
   ];
 

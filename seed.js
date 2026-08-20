@@ -21,13 +21,12 @@ async function seed() {
       {
         name: 'Servicios Maracaibo',
         apiKey: 'maracaibo_secret_key_2026',
-        // Permitimos desarrollo en localhost en varios puertos y wildcard '*' para demostración rápida
-        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*']
+        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*.onrender.com', '*']
       },
       {
         name: 'Sistema de Tickets',
         apiKey: 'tickets_secret_key_2026',
-        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*']
+        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*.onrender.com', '*']
       }
     ];
 

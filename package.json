@@ -10,6 +10,7 @@
     "reload:pm2": "pm2 reload ecosystem.config.js --update-env",
     "test:connector": "bash scripts/test-connector.sh",
     "test:appointments": "node scripts/test-appointment-flow.js",
+    "test:integration": "node scripts/test-integration.js",
     "seed": "node seed.js"
   },
   "dependencies": {

@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: chat-core
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: pnpm install || npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: CORS_ALLOW_LAN
+        value: "false"
+      - key: CORS_ALLOW_ALL
+        value: "true"
+      - key: MONGODB_URI
+        sync: false
+      - key: BUCKET_UPLOAD_URL
+        value: https://api-bucket.smart.com.ve/api/imau/upload
+      - key: BUCKET_API_KEY
+        sync: false
+      - key: BUCKET_FOLDER
+        value: ticket_chat
+      - key: NOTIFICATIONS_API_URL
+        value: https://ticketsotravez-1.onrender.com/notifications/ticket
+      - key: NOTIFICATIONS_API_KEY
+        value: tickets_secret_key_2026
+      - key: TRUST_PROXY_HOPS
+        value: "1"
