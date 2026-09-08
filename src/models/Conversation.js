@@ -52,6 +52,11 @@ const conversationSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  lastCustomerMessageAt: {
+    type: Date,
+    default: null,
+    index: true
+  },
   isOnline: {
     type: Boolean,
     default: false

@@ -88,7 +88,8 @@ async function recordMessage(
     }),
     Conversation.findByIdAndUpdate(convId, {
       lastMessage: preview,
-      updatedAt: new Date()
+      updatedAt: new Date(),
+      ...(senderType === 'customer' ? { lastCustomerMessageAt: new Date() } : {})
     })
   ]);
 

@@ -220,6 +220,41 @@ const server = http.createServer(expressApp);
     }
   });
 
+  // GET /api/integrations/conversations/overdue: Listar conversaciones activas que superen X horas sin respuesta
+  expressApp.get('/api/integrations/conversations/overdue', async (req, res) => {
+    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+    if (!apiKey) {
+      return res.status(401).json({ error: 'API Key requerida' });
+    }
+
+    try {
+      const platform = await Platform.findOne({ apiKey });
+      if (!platform) {
+        return res.status(401).json({ error: 'API Key no autorizada' });
+      }
+
+      const hours = Number(req.query.hours) || 72;
+      const thresholdDate = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+      const overdue = await Conversation.find({
+        status: 'active',
+        $or: [
+          { lastCustomerMessageAt: { $lte: thresholdDate } },
+          { lastCustomerMessageAt: null, createdAt: { $lte: thresholdDate } }
+        ]
+      }).sort({ createdAt: 1 }).limit(100);
+
+      res.json({
+        ok: true,
+        hoursThreshold: hours,
+        count: overdue.length,
+        conversations: overdue
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
 
