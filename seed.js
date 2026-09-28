@@ -5,7 +5,21 @@ const Platform = require('./src/models/Platform');
 const Conversation = require('./src/models/Conversation');
 const Message = require('./src/models/Message');
 
+/**
+ * ⚠️ BORRA plataformas, conversaciones y mensajes. Solo para desarrollo.
+ * Requiere SEED_CONFIRM=yes y se niega a correr con NODE_ENV=production.
+ */
 async function seed() {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('❌ seed.js está bloqueado en producción (borra toda la base de datos).');
+    process.exit(1);
+  }
+  if (process.env.SEED_CONFIRM !== 'yes') {
+    console.error('❌ Este script BORRA plataformas, conversaciones y mensajes.');
+    console.error('   Si estás seguro, ejecuta: SEED_CONFIRM=yes npm run seed');
+    process.exit(1);
+  }
+
   try {
     await mongoose.connect(MONGODB_URI, getMongooseOptions());
     console.log('🌱 Conectado a MongoDB para inicializar datos...');
@@ -20,17 +34,30 @@ async function seed() {
     const testPlatforms = [
       {
         name: 'Servicios Maracaibo',
-        apiKey: 'maracaibo_secret_key_2026',
-        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*.onrender.com', '*']
+        apiKey: process.env.MARACAIBO_API_KEY || 'maracaibo_secret_key_2026',
+        allowedOrigins: [
+          'http://localhost:3000',
+          'http://127.0.0.1:3000',
+          '*.onrender.com',
+          '*.up.railway.app',
+          '*'
+        ]
       },
       {
         name: 'Sistema de Tickets',
-        apiKey: 'tickets_secret_key_2026',
-        allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*.onrender.com', '*']
+        apiKey: process.env.NOTIFICATIONS_API_KEY || 'tickets_secret_key_2026',
+        allowedOrigins: [
+          'http://localhost:3000',
+          'http://127.0.0.1:3000',
+          '*.onrender.com',
+          '*.up.railway.app',
+          '*'
+        ]
       }
     ];
 
-    const createdPlatforms = await Platform.insertMany(testPlatforms);
+    await Platform.insertMany(testPlatforms);
+    const createdPlatforms = await Platform.find().select('+apiKey').lean();
     console.log('✅ Plataformas creadas correctamente en MongoDB:');
     
     createdPlatforms.forEach(p => {

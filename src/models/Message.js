@@ -18,8 +18,7 @@ const messageSchema = new mongoose.Schema({
   conversationId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Conversation',
-    required: [true, 'La conversación asociada es obligatoria'],
-    index: true
+    required: [true, 'La conversación asociada es obligatoria']
   },
   senderType: {
     type: String,
@@ -59,26 +58,22 @@ const messageSchema = new mongoose.Schema({
       'rest_maracaibo',
       'unknown'
     ],
-    default: 'unknown',
-    index: true
+    default: 'unknown'
   },
   /** inbound = ciudadano → soporte | outbound = agente → ciudadano */
   direction: {
     type: String,
-    enum: ['inbound', 'outbound'],
-    index: true
+    enum: ['inbound', 'outbound']
   },
   /** Denormalizado para consultas de historial por ticket sin join */
   externalTicketId: {
     type: String,
     trim: true,
-    index: true,
     default: ''
   },
   customerId: {
     type: String,
     trim: true,
-    index: true,
     default: ''
   },
   timestamp: {
@@ -88,13 +83,14 @@ const messageSchema = new mongoose.Schema({
   /** Cuándo el ciudadano (Servicios Maracaibo) vio el mensaje del agente */
   readByCustomerAt: {
     type: Date,
-    default: null,
-    index: true
+    default: null
   }
 });
 
 messageSchema.index({ conversationId: 1, timestamp: 1 });
 messageSchema.index({ externalTicketId: 1, timestamp: 1 });
 messageSchema.index({ customerId: 1, timestamp: -1 });
+// markMessagesReadByCustomer: no leídos del agente por conversación
+messageSchema.index({ conversationId: 1, senderType: 1, readByCustomerAt: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);

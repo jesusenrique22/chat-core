@@ -1,21 +1,21 @@
-# Dockerfile optimizado para despliegue de chat-core en Render
+# chat-core — despliegue en Railway (también compatible con Render)
 FROM node:20-alpine AS base
 
-# Configurar directorio de trabajo
+RUN apk add --no-cache wget
+
 WORKDIR /app
 
-# Copiar manifiestos e instalar dependencias de producción
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Copiar código de la aplicación
 COPY . .
 
-# Exponer el puerto de la aplicación (Render asignará PORT automáticamente)
+# Railway inyecta PORT; 4000 es solo el default local
 EXPOSE 4000
 
-# Variables de entorno por defecto
 ENV NODE_ENV=production
 
-# Comando de inicio del servidor
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-4000}/health" || exit 1
+
 CMD ["node", "server.js"]

@@ -12,10 +12,7 @@ const localEnvPath = path.resolve(__dirname, '../../.env.local');
 dotenv.config({ path: rootEnvPath });
 dotenv.config({ path: localEnvPath, override: true });
 
-// Asignar fallbacks seguros para evitar que el proceso falle si no se definen variables opcionales/nube
-if (!process.env.BUCKET_API_KEY) {
-  process.env.BUCKET_API_KEY = 'default_bucket_key';
-}
+// Fallbacks solo para opcionales no secretas. NOTIFICATIONS_* y MONGODB_URI son obligatorias.
 if (!process.env.BUCKET_FOLDER) {
   process.env.BUCKET_FOLDER = 'ticket_chat';
 }
@@ -28,12 +25,6 @@ if (!process.env.CORS_ALLOW_LAN) {
 if (!process.env.CORS_ALLOW_ALL) {
   process.env.CORS_ALLOW_ALL = 'true';
 }
-if (!process.env.NOTIFICATIONS_API_URL) {
-  process.env.NOTIFICATIONS_API_URL = 'https://ticketsotravez-production.up.railway.app/notifications/ticket';
-}
-if (!process.env.NOTIFICATIONS_API_KEY) {
-  process.env.NOTIFICATIONS_API_KEY = 'tickets_secret_key_2026';
-}
 
 const logger = require('./logger');
 
@@ -42,7 +33,9 @@ const REQUIRED_ENV = [
   'CORS_ALLOW_LAN',
   'CORS_ALLOW_ALL',
   'NOTIFICATIONS_API_URL',
-  'NOTIFICATIONS_API_KEY'
+  'NOTIFICATIONS_API_KEY',
+  'BUCKET_UPLOAD_URL',
+  'BUCKET_API_KEY'
 ];
 
 const BOOLEAN_ENV = new Set(['CORS_ALLOW_LAN', 'CORS_ALLOW_ALL']);
@@ -85,6 +78,22 @@ function validateEnv() {
 
 validateEnv();
 
+// Avisos de configuración insegura (no bloquean el arranque)
+if (process.env.NODE_ENV === 'production') {
+  if (process.env.CORS_ALLOW_ALL === 'true') {
+    logger.warn('insecure_config', {
+      setting: 'CORS_ALLOW_ALL=true',
+      hint: 'En producción usa CORS_ALLOW_ALL=false y lista los orígenes en CORS_EXTRA_ORIGINS'
+    });
+  }
+  if (process.env.AUTH_ENFORCE !== 'true') {
+    logger.warn('insecure_config', {
+      setting: 'AUTH_ENFORCE!=true',
+      hint: 'El socket /agent, /api/conversations y las rutas de citas aceptan peticiones sin API Key'
+    });
+  }
+}
+
 module.exports = {
   REQUIRED_ENV,
   validateEnv,
@@ -95,5 +104,6 @@ module.exports = {
   BUCKET_API_KEY: process.env.BUCKET_API_KEY,
   BUCKET_FOLDER: process.env.BUCKET_FOLDER,
   NOTIFICATIONS_API_URL: process.env.NOTIFICATIONS_API_URL,
-  NOTIFICATIONS_API_KEY: process.env.NOTIFICATIONS_API_KEY
+  NOTIFICATIONS_API_KEY: process.env.NOTIFICATIONS_API_KEY,
+  REDIS_URL: process.env.REDIS_URL || ''
 };

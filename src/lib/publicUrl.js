@@ -6,6 +6,12 @@ function resolvePublicBaseUrl(port) {
   if (process.env.PUBLIC_BASE_URL) {
     return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
   }
+  // Railway inyecta el dominio público; se usa si no hay PUBLIC_BASE_URL
+  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_STATIC_URL;
+  if (railwayDomain) {
+    const host = railwayDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    return `https://${host}`;
+  }
   const ip = getLocalNetworkIp();
   const p = port || process.env.PORT || 4000;
   return `http://${ip}:${p}`;

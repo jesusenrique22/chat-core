@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -7,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const compression = require('compression');
 
 // Validación estricta antes de cargar el resto (sin defaults para vars críticas)
-const { MONGODB_URI } = require('./src/lib/env');
+const { MONGODB_URI, REDIS_URL } = require('./src/lib/env');
 const { connectMongo, registerShutdownHandlers } = require('./src/lib/mongo');
 const logger = require('./src/lib/logger');
 
@@ -16,71 +17,105 @@ const PORT = process.env.PORT || 4000;
 const { initPublicBaseUrl } = require('./src/lib/publicUrl');
 initPublicBaseUrl(PORT);
 
-// Importar modelos
 const Platform = require('./src/models/Platform');
 const Conversation = require('./src/models/Conversation');
-const {
-  resolveConversationForClient,
-  registerIntegrationRoutes
-} = require('./src/lib/integrations');
-const {
-  DELIVERY_CHANNELS,
-  JOIN_CHAT_MESSAGE_LIMIT,
-  recordMessage,
-  markMessagesReadByCustomer,
-  getConversationHistory,
-  mapMessagesToData,
-  fetchRecentMessagesForConversation,
-  fetchOlderMessagesForConversation
-} = require('./src/lib/messageStore');
-const { validateMessagePayload } = require('./src/lib/messageHelpers');
+const { registerIntegrationRoutes } = require('./src/lib/integrations');
+const { getConversationHistory } = require('./src/lib/messageStore');
 const {
   createCorsOriginHandler,
-  isOriginAllowedForPlatform,
+  getExtraOrigins,
   syncMaracaiboOriginsOnStartup,
   invalidatePlatformOriginsCache,
   logShareUrls
 } = require('./src/lib/cors');
 const { registerUploadRoutes } = require('./src/lib/uploads');
-const { AGENTS_DASHBOARD_ROOM, getDepartmentRoom } = require('./src/lib/socketRooms');
 const { seedDepartmentsIfEmpty } = require('./src/lib/appointments');
 const { registerAppointmentRoutes } = require('./src/lib/appointmentRoutes');
-const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('./src/lib/throttle');
+const { requireAuth, invalidatePlatformCache } = require('./src/lib/auth');
+const { clampInt, asDate } = require('./src/lib/validate');
+const { errorMiddleware } = require('./src/lib/errors');
+const { startWebhookWorker, stopWebhookWorker } = require('./src/lib/webhooks');
+const { attachRedisAdapter } = require('./src/lib/socketAdapter');
+const { registerClientNamespace } = require('./src/sockets/clientNamespace');
+const { registerAgentNamespace } = require('./src/sockets/agentNamespace');
 
-const SEND_MESSAGE_MAX_PER_MIN = Number(process.env.SEND_MESSAGE_MAX_PER_MIN) || 10;
+process.on('unhandledRejection', (reason) => {
+  logger.error('unhandled_rejection', { error: reason?.message || String(reason), stack: reason?.stack });
+});
+process.on('uncaughtException', (err) => {
+  logger.error('uncaught_exception', { error: err.message, stack: err.stack });
+  // Estado desconocido: salir y dejar que PM2/Railway reinicie
+  process.exit(1);
+});
+
+/**
+ * API Key para el auto-seed. En producción nunca se usan claves conocidas:
+ * si falta la variable se genera una aleatoria y se registra UNA vez en el log.
+ */
+function resolveSeedKey(envName, devDefault) {
+  if (process.env[envName]) return process.env[envName];
+  if (process.env.NODE_ENV !== 'production') return devDefault;
+  const generated = crypto.randomBytes(24).toString('hex');
+  logger.warn('seed_generated_api_key', {
+    envName,
+    apiKey: generated,
+    hint: `Guarda esta clave o define ${envName} antes del primer arranque`
+  });
+  return generated;
+}
 
 async function seedPlatformsIfEmpty() {
   try {
     const platformCount = await Platform.countDocuments();
     if (platformCount === 0) {
       logger.info('auto_seed_platforms_start');
-      const testPlatforms = [
+      const origins = ['http://localhost:3000', 'http://127.0.0.1:3000', ...getExtraOrigins()];
+      await Platform.insertMany([
         {
           name: 'Servicios Maracaibo',
-          apiKey: 'maracaibo_secret_key_2026',
-          allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*']
+          apiKey: resolveSeedKey('MARACAIBO_API_KEY', 'maracaibo_secret_key_2026'),
+          allowedOrigins: origins
         },
         {
           name: 'Sistema de Tickets',
-          apiKey: 'tickets_secret_key_2026',
-          allowedOrigins: ['http://localhost:3000', 'http://127.0.0.1:3000', '*']
+          apiKey: process.env.NOTIFICATIONS_API_KEY,
+          allowedOrigins: origins
         }
-      ];
-      await Platform.insertMany(testPlatforms);
+      ]);
       logger.info('auto_seed_platforms_done');
     }
     await syncMaracaiboOriginsOnStartup();
     invalidatePlatformOriginsCache();
+    invalidatePlatformCache();
   } catch (seedErr) {
     logger.error('auto_seed_failed', { error: seedErr.message });
   }
 }
 
-const expressApp = express();
-const server = http.createServer(expressApp);
+/** Sin Redis solo existe esta instancia: toda presencia "online" previa es obsoleta. */
+async function resetStalePresence() {
+  if (REDIS_URL) return;
+  try {
+    const { modifiedCount } = await Conversation.updateMany({ isOnline: true }, { isOnline: false });
+    if (modifiedCount) logger.info('presence_reset', { count: modifiedCount });
+  } catch (err) {
+    logger.error('presence_reset_failed', { error: err.message });
+  }
+}
 
+function buildLimiter(max, message) {
+  return rateLimit({
+    windowMs: 60 * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: message }
+  });
+}
+
+function configureExpress(expressApp, io, corsOriginHandler) {
   // nginx / proxy → X-Forwarded-For. Obligatorio para express-rate-limit (IP real del cliente).
-  // 1 = un hop (nginx en el mismo droplet). Ajusta TRUST_PROXY_HOPS si hay más proxies.
+  // 1 = un hop (Railway / nginx). Ajusta TRUST_PROXY_HOPS si hay más proxies.
   const trustProxyHops = process.env.TRUST_PROXY_HOPS;
   expressApp.set(
     'trust proxy',
@@ -90,6 +125,7 @@ const server = http.createServer(expressApp);
         ? Number(trustProxyHops)
         : 1
   );
+  expressApp.disable('x-powered-by');
 
   expressApp.use(helmet({
     contentSecurityPolicy: false,
@@ -97,7 +133,6 @@ const server = http.createServer(expressApp);
   }));
 
   // CORS: API REST + Socket.io
-  const corsOriginHandler = createCorsOriginHandler();
   expressApp.use(cors({
     origin: corsOriginHandler,
     credentials: true,
@@ -106,161 +141,90 @@ const server = http.createServer(expressApp);
   }));
 
   expressApp.use(compression());
-  expressApp.use(express.json({ limit: '1mb' }));
-  expressApp.use(express.urlencoded({ limit: '1mb', extended: true }));
+  const bodyLimit = process.env.JSON_BODY_LIMIT || '256kb';
+  expressApp.use(express.json({ limit: bodyLimit }));
+  expressApp.use(express.urlencoded({ limit: bodyLimit, extended: false }));
 
-  // Health / raíz: este servicio es solo API (sin HTML). Evita el "Cannot GET /" confuso.
+  // Health / raíz: este servicio es solo API (sin HTML).
   const healthPayload = () => ({
     ok: true,
     service: 'chat-core',
     status: 'live',
-    notificationsWebhook: process.env.NOTIFICATIONS_API_URL || null,
     time: new Date().toISOString(),
   });
   expressApp.get('/', (_req, res) => res.status(200).json(healthPayload()));
   expressApp.get('/health', (_req, res) => res.status(200).json(healthPayload()));
 
-  const integrationsLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: Number(process.env.RATE_LIMIT_INTEGRATIONS) || 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Demasiadas peticiones. Intente de nuevo en un minuto.' }
-  });
-
-  const conversationsLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: Number(process.env.RATE_LIMIT_CONVERSATIONS) || 60,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Demasiadas peticiones. Intente de nuevo en un minuto.' }
-  });
-
-  const uploadsLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: Number(process.env.RATE_LIMIT_UPLOADS) || 20,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: 'Demasiadas subidas. Intente de nuevo en un minuto.' }
-  });
-
-  expressApp.use('/api/integrations', integrationsLimiter);
-  expressApp.use('/api/conversations', conversationsLimiter);
-  expressApp.use('/api/uploads', uploadsLimiter);
+  expressApp.use('/api/integrations', buildLimiter(
+    Number(process.env.RATE_LIMIT_INTEGRATIONS) || 100,
+    'Demasiadas peticiones. Intente de nuevo en un minuto.'
+  ));
+  expressApp.use('/api/conversations', buildLimiter(
+    Number(process.env.RATE_LIMIT_CONVERSATIONS) || 60,
+    'Demasiadas peticiones. Intente de nuevo en un minuto.'
+  ));
+  expressApp.use('/api/uploads', buildLimiter(
+    Number(process.env.RATE_LIMIT_UPLOADS) || 20,
+    'Demasiadas subidas. Intente de nuevo en un minuto.'
+  ));
 
   // ============================================
   // Endpoints REST (monitoreo / agentes)
   // ============================================
+  const agentAuth = requireAuth('agent');
 
-  // GET /api/conversations: Conversaciones activas (respuesta = array, mismo contrato)
-  expressApp.get('/api/conversations', async (req, res) => {
-    try {
-      const conversations = await Conversation.find({ status: 'active' })
-        .populate('platformId')
-        .sort({ updatedAt: -1 })
-        .lean();
-      res.json(conversations);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
+  // GET /api/conversations: conversaciones activas (respuesta = array, mismo contrato).
+  // Paginación opcional: ?limit=N&before=<updatedAt ISO>. Header X-Has-More indica si hay más.
+  expressApp.get('/api/conversations', agentAuth, async (req, res) => {
+    const limit = clampInt(req.query.limit, { min: 1, max: 1000, fallback: 500 });
+    const before = asDate(req.query.before);
+    const filter = { status: 'active' };
+    if (before) filter.updatedAt = { $lt: before };
+
+    const conversations = await Conversation.find(filter)
+      .populate('platformId', 'name')
+      .sort({ updatedAt: -1 })
+      .limit(limit + 1)
+      .lean();
+
+    const hasMore = conversations.length > limit;
+    res.set('X-Has-More', String(hasMore));
+    res.json(hasMore ? conversations.slice(0, limit) : conversations);
   });
 
   // GET /api/conversations/:id/messages: Historial de mensajes de un chat específico
-  expressApp.get('/api/conversations/:id/messages', async (req, res) => {
-    try {
-      const { id } = req.params;
-      const history = await getConversationHistory(id, req.query);
-      res.json(history.messages);
-    } catch (err) {
-      res.status(err.status || 500).json({ error: err.message });
-    }
+  expressApp.get('/api/conversations/:id/messages', agentAuth, async (req, res) => {
+    const history = await getConversationHistory(req.params.id, req.query);
+    res.json(history.messages);
   });
 
   // GET /api/conversations/:id/history: Historial estructurado con trazabilidad
-  expressApp.get('/api/conversations/:id/history', async (req, res) => {
-    try {
-      const history = await getConversationHistory(req.params.id, req.query);
-      res.json(history);
-    } catch (err) {
-      res.status(err.status || 500).json({ error: err.message });
-    }
-  });
-
-  // GET /api/integrations/presence/ticket/:ticketId: Consultar presencia del cliente de un ticket por API REST
-  expressApp.get('/api/integrations/presence/ticket/:ticketId', async (req, res) => {
-    const { ticketId } = req.params;
-    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
-
-    if (!apiKey) {
-      return res.status(401).json({ error: 'API Key requerida' });
-    }
-
-    try {
-      const platform = await Platform.findOne({ apiKey });
-      if (!platform) {
-        return res.status(401).json({ error: 'API Key no autorizada' });
-      }
-
-      // Buscar conversación activa o la más reciente vinculada al ticket
-      const conversation = await Conversation.findOne({ externalTicketId: ticketId })
-        .sort({ updatedAt: -1 });
-
-      if (!conversation) {
-        return res.status(404).json({ error: 'Conversación no encontrada para el ticket especificado' });
-      }
-
-      res.json({
-        ticketId,
-        conversationId: conversation._id,
-        isOnline: !!conversation.isOnline,
-        lastUpdatedAt: conversation.updatedAt
-      });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /api/integrations/conversations/overdue: Listar conversaciones activas que superen X horas sin respuesta
-  expressApp.get('/api/integrations/conversations/overdue', async (req, res) => {
-    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
-    if (!apiKey) {
-      return res.status(401).json({ error: 'API Key requerida' });
-    }
-
-    try {
-      const platform = await Platform.findOne({ apiKey });
-      if (!platform) {
-        return res.status(401).json({ error: 'API Key no autorizada' });
-      }
-
-      const hours = Number(req.query.hours) || 72;
-      const thresholdDate = new Date(Date.now() - hours * 60 * 60 * 1000);
-
-      const overdue = await Conversation.find({
-        status: 'active',
-        $or: [
-          { lastCustomerMessageAt: { $lte: thresholdDate } },
-          { lastCustomerMessageAt: null, createdAt: { $lte: thresholdDate } }
-        ]
-      }).sort({ createdAt: 1 }).limit(100);
-
-      res.json({
-        ok: true,
-        hoursThreshold: hours,
-        count: overdue.length,
-        conversations: overdue
-      });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
+  expressApp.get('/api/conversations/:id/history', agentAuth, async (req, res) => {
+    const history = await getConversationHistory(req.params.id, req.query);
+    res.json(history);
   });
 
   // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
+  registerIntegrationRoutes(expressApp, io);
+  registerAppointmentRoutes(expressApp, io.of('/agent'), io.of('/client'));
 
-  // ============================================
-  // Configuración de Socket.io
-  // ============================================
+  expressApp.use('/api', (_req, res) => {
+    res.status(404).json({ success: false, error: 'Ruta no encontrada' });
+  });
+  expressApp.use(errorMiddleware);
+}
+
+async function bootstrap() {
+  await connectMongo(MONGODB_URI);
+  await seedPlatformsIfEmpty();
+  await seedDepartmentsIfEmpty();
+  await resetStalePresence();
+
+  const expressApp = express();
+  const server = http.createServer(expressApp);
+  const corsOriginHandler = createCorsOriginHandler();
+
   const recoveryMs =
     Number(process.env.SOCKET_RECOVERY_MS) ||
     (process.env.NODE_ENV === 'production' ? 30 * 1000 : 2 * 60 * 1000);
@@ -271,6 +235,8 @@ const server = http.createServer(expressApp);
       // Re-validar auth de plataforma (/client) tras recovery
       skipMiddlewares: false
     },
+    // Los mensajes son texto (≤4000 chars) o URLs: 1 MB por paquete era excesivo
+    maxHttpBufferSize: Number(process.env.SOCKET_MAX_BUFFER_BYTES) || 256 * 1024,
     cors: {
       origin: corsOriginHandler,
       methods: ['GET', 'POST', 'OPTIONS'],
@@ -278,432 +244,47 @@ const server = http.createServer(expressApp);
     }
   });
 
-  const clientNamespace = io.of('/client');
-  const agentNamespace = io.of('/agent');
+  // El adaptador debe estar listo antes de registrar los namespaces
+  const closeRedis = await attachRedisAdapter(io, REDIS_URL);
 
-  registerIntegrationRoutes(expressApp, io);
-  registerAppointmentRoutes(expressApp, agentNamespace, clientNamespace);
+  registerClientNamespace(io);
+  registerAgentNamespace(io);
+  configureExpress(expressApp, io, corsOriginHandler);
 
-  // Middleware de validación de API Key y CORS para Clientes
-  clientNamespace.use(async (socket, nextMiddleware) => {
-    const { apiKey, customerId, customerName, ticketId } = socket.handshake.auth || socket.handshake.query;
-    const origin = socket.handshake.headers.origin;
-
-    if (!apiKey) {
-      return nextMiddleware(new Error('Autenticación fallida: API Key requerida'));
-    }
-    if (!customerId || !customerName) {
-      return nextMiddleware(new Error('Autenticación fallida: Datos de cliente incompletos'));
-    }
-
-    try {
-      const platform = await Platform.findOne({ apiKey });
-      if (!platform) {
-        return nextMiddleware(new Error('Autenticación fallida: API Key no autorizada'));
+  await new Promise((resolve, reject) => {
+    server.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error('port_in_use', { port: PORT });
       }
-
-      // Validar origen según plataforma + reglas globales (VPN, .env)
-      if (origin && !isOriginAllowedForPlatform(origin, platform)) {
-        logger.warn('socket_cors_blocked', { origin, platform: platform.name });
-        return nextMiddleware(new Error(`Autenticación de origen bloqueada por CORS: ${origin}`));
-      }
-
-      // Almacenar referencias en el objeto socket
-      socket.platform = platform;
-      socket.customerId = customerId;
-      socket.customerName = customerName;
-      socket.ticketId = ticketId ? String(ticketId).trim() : null;
-      return nextMiddleware();
-    } catch (err) {
-      return nextMiddleware(new Error('Error interno del servidor en autenticación'));
-    }
+      reject(err);
+    });
+    server.listen(PORT, '0.0.0.0', resolve);
   });
 
-  // ============================================
-  // Eventos: Clientes (/client)
-  // ============================================
-  clientNamespace.on('connection', (socket) => {
-    logger.info('client_connected', {
-      customerName: socket.customerName,
-      platform: socket.platform.name
-    });
+  startWebhookWorker();
 
-    socket.on('join_chat', async (callback) => {
-      try {
-        const conversation = await resolveConversationForClient(socket, socket.ticketId);
-        const roomId = conversation._id.toString();
-
-        socket.join(roomId);
-        socket.conversationId = roomId;
-
-        const messages = await fetchRecentMessagesForConversation(conversation._id);
-        const mapped = mapMessagesToData(messages);
-
-        if (typeof callback === 'function') {
-          callback({
-            success: true,
-            conversationId: conversation._id,
-            externalTicketId: conversation.externalTicketId || null,
-            messages: mapped,
-            hasMore: mapped.length >= JOIN_CHAT_MESSAGE_LIMIT
-          });
-        }
-
-        // Presencia + lecturas + emit en paralelo (después del callback = join más rápido)
-        const populatePromise =
-          conversation.platformId && typeof conversation.platformId === 'object' && conversation.platformId.name
-            ? Promise.resolve(conversation)
-            : conversation.populate('platformId');
-
-        const [, populatedConv] = await Promise.all([
-          Conversation.findByIdAndUpdate(conversation._id, { isOnline: true }),
-          populatePromise,
-          markMessagesReadByCustomer(conversation._id, io) // no-op si no hay unread
-        ]);
-
-        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', populatedConv);
-
-        const presencePayload = {
-          conversationId: roomId,
-          online: true,
-          customerName: socket.customerName
-        };
-        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('client_presence', presencePayload);
-        agentNamespace.to(roomId).emit('client_presence', presencePayload);
-      } catch (err) {
-        logger.error('join_chat_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    socket.on('load_older_messages', async (data, callback) => {
-      try {
-        if (typeof data === 'function') {
-          callback = data;
-          data = {};
-        }
-        const conversationId = socket.conversationId;
-        if (!conversationId) {
-          return callback && callback({ success: false, error: 'No hay conversación activa' });
-        }
-        const before = data?.before;
-        if (!before) {
-          return callback && callback({ success: false, error: 'before (timestamp) es requerido' });
-        }
-
-        const { messages, hasMore } = await fetchOlderMessagesForConversation(
-          conversationId,
-          before,
-          data?.limit || JOIN_CHAT_MESSAGE_LIMIT
-        );
-
-        if (typeof callback === 'function') {
-          callback({
-            success: true,
-            messages: mapMessagesToData(messages),
-            hasMore
-          });
-        }
-      } catch (err) {
-        logger.error('load_older_messages_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    socket.on('send_message', async (data, callback) => {
-      try {
-        if (shouldRateLimitSocketEvent(socket, 'send_message', SEND_MESSAGE_MAX_PER_MIN, 60_000)) {
-          return callback && callback({
-            success: false,
-            error: `Límite de mensajes alcanzado (máx ${SEND_MESSAGE_MAX_PER_MIN}/min)`
-          });
-        }
-
-        const payload = validateMessagePayload(data);
-        if (payload.error) {
-          return callback && callback({ success: false, error: payload.error });
-        }
-
-        let conversationId = socket.conversationId;
-        if (!conversationId) {
-          return callback && callback({ success: false, error: 'No se ha unido a un chat activo. Ejecute join_chat primero.' });
-        }
-
-        const result = await recordMessage(
-          {
-            conversationId,
-            senderType: 'customer',
-            messageType: payload.messageType,
-            content: payload.content,
-            attachment: payload.attachment,
-            deliveryChannel: DELIVERY_CHANNELS.SOCKET_CLIENT
-          },
-          io
-        );
-
-        if (typeof callback === 'function') {
-          callback({ success: true, message: result.message });
-        }
-      } catch (err) {
-        logger.error('client_send_message_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    // El ciudadano vio los mensajes del agente (chat abierto o mensaje nuevo en pantalla)
-    socket.on('mark_messages_read', async (data, callback) => {
-      try {
-        if (typeof data === 'function') {
-          callback = data;
-          data = {};
-        }
-
-        const conversationId = socket.conversationId;
-        if (!conversationId) {
-          return callback && callback({ success: false, error: 'No hay conversación activa' });
-        }
-
-        const messageId = data?.messageId ? String(data.messageId).trim() : undefined;
-        const result = await markMessagesReadByCustomer(conversationId, io, { messageId });
-        if (typeof callback === 'function') {
-          callback({ success: true, marked: !!result, ...(result || {}) });
-        }
-      } catch (err) {
-        logger.error('mark_messages_read_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    // Indicador: cliente está escribiendo
-    socket.on('client_typing', (data) => {
-      const conversationId = socket.conversationId;
-      if (!conversationId) return;
-      const isTyping = !!(data && data.isTyping);
-      if (isTyping && shouldThrottleSocketEvent(socket, 'client_typing', 2000)) return;
-
-      const payload = {
-        conversationId,
-        senderType: 'customer',
-        displayName: socket.customerName,
-        isTyping
-      };
-      agentNamespace.to(conversationId).emit('user_typing', payload);
-      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_typing', payload);
-    });
-
-    socket.on('disconnect', (reason) => {
-      const conversationId = socket.conversationId;
-      if (conversationId) {
-        // Limpiar indicador de typing
-        const typingPayload = {
-          conversationId,
-          senderType: 'customer',
-          displayName: socket.customerName,
-          isTyping: false
-        };
-        agentNamespace.to(conversationId).emit('user_typing', typingPayload);
-        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_typing', typingPayload);
-
-        const presencePayload = {
-          conversationId,
-          online: false,
-          customerName: socket.customerName
-        };
-        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('client_presence', presencePayload);
-        agentNamespace.to(conversationId).emit('client_presence', presencePayload);
-
-        // Marcar presencia como offline en MongoDB en segundo plano
-        Conversation.findByIdAndUpdate(conversationId, { isOnline: false })
-          .catch((err) => logger.error('presence_offline_update_failed', { error: err.message }));
-      }
-      logger.info('client_disconnected', {
-        customerName: socket.customerName,
-        reason
-      });
-    });
+  initPublicBaseUrl(PORT);
+  logShareUrls(PORT);
+  logger.info('server_ready', {
+    port: PORT,
+    bucketFolder: process.env.BUCKET_FOLDER,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    authEnforced: process.env.AUTH_ENFORCE === 'true',
+    redis: !!REDIS_URL
   });
 
-  // ============================================
-  // Eventos: Agentes (/agent)
-  // ============================================
-  agentNamespace.on('connection', (socket) => {
-    socket.join(AGENTS_DASHBOARD_ROOM);
-    logger.info('agent_connected');
-
-    socket.on('agent_join', (data) => {
-      const { conversationId } = data;
-      if (conversationId) {
-        socket.rooms.forEach((room) => {
-          if (
-            room !== socket.id &&
-            room !== conversationId &&
-            room !== AGENTS_DASHBOARD_ROOM &&
-            !room.startsWith('dept-')
-          ) {
-            socket.leave(room);
-          }
-        });
-        socket.join(conversationId);
-        logger.debug('agent_joined_room', { conversationId });
-      }
-    });
-
-    // Unir al Jefe de Departamento a la sala de su departamento CPU
-    socket.on('join_department', (data) => {
-      const { departmentId } = data || {};
-      if (departmentId) {
-        const deptRoom = getDepartmentRoom(departmentId);
-        socket.join(deptRoom);
-        logger.info('agent_joined_department_room', { departmentId, deptRoom });
-      }
-    });
-
-    // Salir de la sala de departamento (al cambiar de departamento en el selector)
-    socket.on('leave_department', (data) => {
-      const { departmentId } = data || {};
-      if (departmentId) {
-        const deptRoom = getDepartmentRoom(departmentId);
-        socket.leave(deptRoom);
-        logger.info('agent_left_department_room', { departmentId, deptRoom });
-      }
-    });
-
-    socket.on('agent_send_message', async (data, callback) => {
-      try {
-        if (shouldRateLimitSocketEvent(socket, 'send_message', SEND_MESSAGE_MAX_PER_MIN, 60_000)) {
-          return callback && callback({
-            success: false,
-            error: `Límite de mensajes alcanzado (máx ${SEND_MESSAGE_MAX_PER_MIN}/min)`
-          });
-        }
-
-        const { conversationId } = data;
-        if (!conversationId) {
-          return callback && callback({ success: false, error: 'conversationId es requerido' });
-        }
-
-        const payload = validateMessagePayload(data);
-        if (payload.error) {
-          return callback && callback({ success: false, error: payload.error });
-        }
-
-        const result = await recordMessage(
-          {
-            conversationId,
-            senderType: 'agent',
-            messageType: payload.messageType,
-            content: payload.content,
-            attachment: payload.attachment,
-            senderName: 'Agente',
-            deliveryChannel: DELIVERY_CHANNELS.SOCKET_AGENT
-          },
-          io
-        );
-
-        if (typeof callback === 'function') {
-          callback({ success: true, message: result.message });
-        }
-      } catch (err) {
-        logger.error('agent_send_message_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    // Indicador: agente está escribiendo
-    socket.on('agent_typing', (data) => {
-      const { conversationId, isTyping } = data || {};
-      if (!conversationId) return;
-      if (isTyping && shouldThrottleSocketEvent(socket, 'agent_typing', 2000)) return;
-      clientNamespace.to(conversationId).emit('user_typing', {
-        conversationId,
-        senderType: 'agent',
-        displayName: 'Agente de soporte',
-        isTyping: !!isTyping
-      });
-    });
-
-    // Evento: close_conversation - Finalizar la conversación
-    socket.on('close_conversation', async (data, callback) => {
-      try {
-        const { conversationId } = data;
-        if (!conversationId) {
-          return callback && callback({ success: false, error: 'ID de conversación inválido' });
-        }
-
-        // Cerrar estado en base de datos
-        const conversation = await Conversation.findByIdAndUpdate(
-          conversationId,
-          { status: 'closed' },
-          { new: true }
-        ).populate('platformId');
-
-        // Emitir notificaciones de cierre a clientes y agentes
-        clientNamespace.to(conversationId).emit('conversation_closed', { conversationId });
-        agentNamespace.to(conversationId).emit('conversation_closed', { conversationId });
-        
-        // Notificar cambio de lista general (los agentes remueven o archivan el chat)
-        agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_updated', conversation);
-
-        if (typeof callback === 'function') {
-          callback({ success: true, conversation });
-        }
-      } catch (err) {
-        logger.error('close_conversation_failed', { error: err.message });
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message });
-        }
-      }
-    });
-
-    socket.on('disconnect', () => {
-      logger.info('agent_disconnected');
-    });
-  });
-
-  async function bootstrap() {
-    await connectMongo(MONGODB_URI);
-    await seedPlatformsIfEmpty();
-    await seedDepartmentsIfEmpty();
-
-    await new Promise((resolve, reject) => {
-      server.listen(PORT, '0.0.0.0', (err) => {
-        if (err) {
-          if (err.code === 'EADDRINUSE') {
-            logger.error('port_in_use', { port: PORT });
-          }
-          return reject(err);
-        }
-        resolve();
-      });
-    });
-
-    initPublicBaseUrl(PORT);
-    logShareUrls(PORT);
-    logger.info('server_ready', {
-      port: PORT,
-      bucketFolder: process.env.BUCKET_FOLDER,
-      nodeEnv: process.env.NODE_ENV || 'development'
-    });
-
-    // PM2 wait_ready: el proceso está listo para recibir tráfico
-    if (typeof process.send === 'function') {
-      process.send('ready');
-    }
-
-    registerShutdownHandlers(server, io);
+  // PM2 wait_ready: el proceso está listo para recibir tráfico
+  if (typeof process.send === 'function') {
+    process.send('ready');
   }
 
-  bootstrap().catch((err) => {
-    logger.error('bootstrap_failed', { error: err.message });
-    process.exit(1);
-  });
+  registerShutdownHandlers(server, io, [
+    () => stopWebhookWorker(),
+    ...(closeRedis ? [closeRedis] : [])
+  ]);
+}
+
+bootstrap().catch((err) => {
+  logger.error('bootstrap_failed', { error: err.message });
+  process.exit(1);
+});

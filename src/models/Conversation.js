@@ -18,15 +18,12 @@ const conversationSchema = new mongoose.Schema({
   },
   customerId: {
     type: String,
-    required: [true, 'El ID del cliente es obligatorio'],
-    index: true
+    required: [true, 'El ID del cliente es obligatorio']
   },
   /** ID del ticket en el sistema externo de tickets (ej. "TK-12345") */
   externalTicketId: {
     type: String,
-    trim: true,
-    index: true,
-    sparse: true
+    trim: true
   },
   /** Canal de origen del ciudadano */
   sourceChannel: {
@@ -45,8 +42,7 @@ const conversationSchema = new mongoose.Schema({
       values: ['active', 'closed'],
       message: 'El estado debe ser "active" o "closed"'
     },
-    default: 'active',
-    index: true
+    default: 'active'
   },
   lastMessage: {
     type: String,
@@ -54,8 +50,7 @@ const conversationSchema = new mongoose.Schema({
   },
   lastCustomerMessageAt: {
     type: Date,
-    default: null,
-    index: true
+    default: null
   },
   isOnline: {
     type: Boolean,
@@ -67,6 +62,18 @@ const conversationSchema = new mongoose.Schema({
 
 conversationSchema.index({ customerId: 1, platformId: 1, status: 1 });
 conversationSchema.index({ externalTicketId: 1, status: 1 });
+// Máximo UNA conversación activa por ticket (evita duplicados por conexiones simultáneas).
+// Si la BDD ya tiene duplicados, Mongo no crea el índice: se registra el error y el servicio sigue.
+conversationSchema.index(
+  { externalTicketId: 1 },
+  {
+    name: 'uniq_active_ticket',
+    unique: true,
+    partialFilterExpression: { status: 'active', externalTicketId: { $type: 'string', $gt: '' } }
+  }
+);
 conversationSchema.index({ status: 1, updatedAt: -1 });
+conversationSchema.index({ status: 1, lastCustomerMessageAt: 1 });
+conversationSchema.index({ isOnline: 1 });
 
 module.exports = mongoose.model('Conversation', conversationSchema);
