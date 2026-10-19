@@ -258,7 +258,8 @@ async function bootstrap() {
       }
       reject(err);
     });
-    server.listen(PORT, '0.0.0.0', resolve);
+    // '::' acepta IPv4 e IPv6: la red privada de Railway (*.railway.internal) puede ir por IPv6.
+    server.listen(PORT, '::', resolve);
   });
 
   startWebhookWorker();
@@ -269,7 +270,7 @@ async function bootstrap() {
     port: PORT,
     bucketFolder: process.env.BUCKET_FOLDER,
     nodeEnv: process.env.NODE_ENV || 'development',
-    authEnforced: process.env.AUTH_ENFORCE === 'true',
+    agentTokens: !!process.env.AGENT_TOKEN_SECRET,
     redis: !!REDIS_URL
   });
 

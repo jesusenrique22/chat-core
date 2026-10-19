@@ -8,9 +8,11 @@ const logger = require('./logger');
 function getMongooseOptions() {
   const isProd = process.env.NODE_ENV === 'production';
 
+  // Una sola instancia en Railway no necesita 50 conexiones: cada una ocupa RAM en el
+  // proceso (que Railway cobra) y una conexión en el servidor de Mongo.
   return {
-    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 50,
-    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 5,
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1,
     serverSelectionTimeoutMS:
       Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || (isProd ? 10000 : 5000),
     socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45000,

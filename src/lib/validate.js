@@ -41,6 +41,16 @@ function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Cédula/RIF comparable: mayúsculas, sin espacios, puntos ni guiones ("v-12.345.678" → "V12345678").
+ * Misma regla que formatTicketCedula de la app de Servicios Maracaibo, más los puntos que
+ * pueden traer los tickets cargados a mano en el panel.
+ */
+function normalizeCustomerId(value) {
+  const str = asString(value, { max: 128 });
+  return str ? str.toUpperCase().replace(/[\s.\-]/g, '') : '';
+}
+
 /** Ack de Socket.io seguro: siempre devuelve una función. */
 function safeAck(callback) {
   return typeof callback === 'function' ? callback : () => {};
@@ -53,5 +63,6 @@ module.exports = {
   clampInt,
   asDate,
   escapeRegex,
+  normalizeCustomerId,
   safeAck
 };

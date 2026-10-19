@@ -9,8 +9,12 @@ const dotenv = require('dotenv');
 const rootEnvPath = path.resolve(__dirname, '../../.env');
 const localEnvPath = path.resolve(__dirname, '../../.env.local');
 
-dotenv.config({ path: rootEnvPath });
-dotenv.config({ path: localEnvPath, override: true });
+// Las pruebas fijan su propio entorno (Mongo en memoria): sin esto, .env.local (override)
+// las apuntaría a la base real.
+if (process.env.CHAT_CORE_SKIP_DOTENV !== 'true') {
+  dotenv.config({ path: rootEnvPath });
+  dotenv.config({ path: localEnvPath, override: true });
+}
 
 // Fallbacks solo para opcionales no secretas. NOTIFICATIONS_* y MONGODB_URI son obligatorias.
 if (!process.env.BUCKET_FOLDER) {
@@ -86,10 +90,10 @@ if (process.env.NODE_ENV === 'production') {
       hint: 'En producción usa CORS_ALLOW_ALL=false y lista los orígenes en CORS_EXTRA_ORIGINS'
     });
   }
-  if (process.env.AUTH_ENFORCE !== 'true') {
+  if (!process.env.AGENT_TOKEN_SECRET) {
     logger.warn('insecure_config', {
-      setting: 'AUTH_ENFORCE!=true',
-      hint: 'El socket /agent, /api/conversations y las rutas de citas aceptan peticiones sin API Key'
+      setting: 'AGENT_TOKEN_SECRET vacío',
+      hint: 'El panel de tickets no podrá conectar el socket /agent desde el navegador'
     });
   }
 }

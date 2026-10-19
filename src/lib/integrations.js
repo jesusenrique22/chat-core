@@ -16,11 +16,10 @@ const {
 const {
   authenticateRequest,
   getMaracaiboPlatform,
-  isAuthEnforced,
   isMaracaiboPlatform,
   isTicketsPlatform
 } = require('./auth');
-const { asString, clampInt } = require('./validate');
+const { asString, clampInt, normalizeCustomerId } = require('./validate');
 const { badRequest, forbidden, notFound } = require('./errors');
 const { AGENTS_DASHBOARD_ROOM } = require('./socketRooms');
 const { getUptimeSec, getStartedAtIso } = require('./runtime');
@@ -147,22 +146,18 @@ async function linkConversation({
 
 /**
  * Un ciudadano solo puede tomar la conversación de un ticket que ya es suyo.
- * Con AUTH_ENFORCE=true se rechaza; en modo legado se reasigna (comportamiento previo) y se registra.
+ * La cédula se compara normalizada: el panel guarda la del ticket tal cual ("V-12345678")
+ * y la app envía "V12345678".
  */
 function assertCustomerOwnsConversation(conversation, socket) {
-  if (!conversation.customerId || conversation.customerId === socket.customerId) return;
+  if (!conversation.customerId) return;
+  if (normalizeCustomerId(conversation.customerId) === normalizeCustomerId(socket.customerId)) return;
 
-  if (isAuthEnforced()) {
-    logger.warn('client_ticket_owner_mismatch_rejected', {
-      ticketId: conversation.externalTicketId,
-      conversationId: String(conversation._id)
-    });
-    throw forbidden('El ticket pertenece a otro ciudadano');
-  }
-  logger.warn('client_ticket_owner_reassigned', {
+  logger.warn('client_ticket_owner_mismatch_rejected', {
     ticketId: conversation.externalTicketId,
     conversationId: String(conversation._id)
   });
+  throw forbidden('El ticket pertenece a otro ciudadano');
 }
 
 /**
@@ -308,7 +303,7 @@ async function deliverCustomerMessage(
 ) {
   const conversation = await findActiveConversationByTicketId(ticketId);
 
-  if (conversation.customerId !== asString(customerId, { max: 128 })) {
+  if (normalizeCustomerId(conversation.customerId) !== normalizeCustomerId(customerId)) {
     throw forbidden('customerId no coincide con el ticket enlazado');
   }
 
