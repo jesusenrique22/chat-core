@@ -56,48 +56,67 @@ function isPrivateLanIp(hostname) {
   return false;
 }
 
+function parseOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** Orígenes de desarrollo: loopback exacto (no "contiene localhost") y LAN privada si CORS_ALLOW_LAN. */
 function isDevOrigin(origin) {
   if (!origin) return true;
-  if (origin.includes('localhost') || origin.includes('127.0.0.1')) return true;
+  const url = parseOrigin(origin);
+  if (!url) return false;
+  const host = url.hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  if (isPrivateLanIp(host)) return process.env.CORS_ALLOW_LAN === 'true';
+  return false;
+}
 
-  const match = origin.match(/^https?:\/\/([^/:]+)(:\d+)?/i);
-  if (match && isPrivateLanIp(match[1])) {
-    return process.env.CORS_ALLOW_LAN === 'true';
+/**
+ * Coincidencia estricta de un origen contra un patrón configurado:
+ * - "*"                        → cualquiera
+ * - "https://app.com:8443"     → origen exacto
+ * - "https://app.com"          → mismo protocolo + host (cualquier puerto)
+ * - "*.dominio.com" / "https://*.dominio.com" → subdominios (y el dominio raíz)
+ */
+function matchesPattern(origin, pattern) {
+  if (!pattern) return false;
+  if (pattern === '*') return true;
+
+  const url = parseOrigin(origin);
+  if (!url) return false;
+  const host = url.hostname.toLowerCase();
+  let p = pattern.trim().toLowerCase().replace(/\/+$/, '');
+
+  let protocol = null;
+  const protoMatch = p.match(/^(https?):\/\//);
+  if (protoMatch) {
+    protocol = `${protoMatch[1]}:`;
+    p = p.slice(protoMatch[0].length);
+  }
+  if (protocol && url.protocol !== protocol) return false;
+
+  if (p.startsWith('*.')) {
+    const suffix = p.slice(2).split(/[/:]/)[0];
+    return host === suffix || host.endsWith(`.${suffix}`);
   }
 
-  return false;
+  const [patternHost, patternPort] = p.split('/')[0].split(':');
+  if (patternHost !== host) return false;
+  if (patternPort) return (url.port || (url.protocol === 'https:' ? '443' : '80')) === patternPort;
+  return true;
 }
 
 function matchesAllowedList(origin, allowedList) {
   if (!allowedList || !allowedList.length) return false;
-  return allowedList.some((allowed) => {
-    if (allowed === '*') return true;
-    if (allowed === origin) return true;
-    if (origin.startsWith(allowed)) return true;
-
-    // Soporte para patrones con comodín tipo "*.onrender.com" o "https://*.onrender.com"
-    if (allowed.includes('*') && origin) {
-      try {
-        const originUrl = new URL(origin);
-        const host = originUrl.hostname.toLowerCase();
-        let targetPattern = allowed.toLowerCase();
-
-        if (targetPattern.startsWith('http://') || targetPattern.startsWith('https://')) {
-          const patternHost = targetPattern.split('://')[1].split('/')[0];
-          if (patternHost.startsWith('*.')) {
-            const domainSuffix = patternHost.slice(2);
-            return host === domainSuffix || host.endsWith('.' + domainSuffix);
-          }
-        } else if (targetPattern.startsWith('*.')) {
-          const domainSuffix = targetPattern.slice(2);
-          return host === domainSuffix || host.endsWith('.' + domainSuffix);
-        }
-      } catch (e) {
-        // Ignorar errores de formateo de URL
-      }
-    }
-    return false;
-  });
+  return allowedList.some((allowed) => matchesPattern(origin, allowed));
 }
 
 async function isOriginAllowedGlobally(origin) {
@@ -133,28 +152,18 @@ function isOriginAllowedForPlatform(origin, platform) {
   return false;
 }
 
+/**
+ * Añade CORS_EXTRA_ORIGINS a las plataformas al arrancar.
+ * Ya NO inyecta "*" ni comodines de hosting: eso impedía cerrar CORS desde la BDD.
+ */
 async function syncMaracaiboOriginsOnStartup() {
   const extra = getExtraOrigins();
-  const lanIp = getLocalNetworkIp();
-  const defaults = [
-    '*',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    `http://${lanIp}:4000`,
-    `http://${lanIp}:3000`,
-    '*.onrender.com',
-    'https://*.onrender.com',
-    ...extra
-  ];
+  if (!extra.length) return;
 
   try {
-    await Platform.updateOne(
-      { name: 'Servicios Maracaibo' },
-      { $addToSet: { allowedOrigins: { $each: defaults } } }
-    );
-    await Platform.updateOne(
-      { name: 'Sistema de Tickets' },
-      { $addToSet: { allowedOrigins: { $each: defaults } } }
+    await Platform.updateMany(
+      { name: { $in: ['Servicios Maracaibo', 'Sistema de Tickets'] } },
+      { $addToSet: { allowedOrigins: { $each: extra } } }
     );
     invalidatePlatformOriginsCache();
   } catch (err) {
@@ -189,6 +198,7 @@ module.exports = {
   getExtraOrigins,
   getLocalNetworkIp,
   isDevOrigin,
+  matchesAllowedList,
   isOriginAllowedGlobally,
   isOriginAllowedForPlatform,
   syncMaracaiboOriginsOnStartup,

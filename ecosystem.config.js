@@ -3,8 +3,11 @@ module.exports = {
     {
       name: 'chat-backend',
       script: 'server.js',
-      instances: process.env.PM2_INSTANCES || 'max',
-      exec_mode: process.env.PM2_EXEC_MODE || 'cluster',
+      // Socket.io guarda sockets/salas en memoria del proceso: varias instancias SIN Redis
+      // pierden mensajes entre procesos. Con REDIS_URL se puede escalar (clientes con
+      // transports: ['websocket'] o balanceador con sticky sessions).
+      instances: process.env.PM2_INSTANCES || (process.env.REDIS_URL ? 'max' : 1),
+      exec_mode: process.env.PM2_EXEC_MODE || (process.env.REDIS_URL ? 'cluster' : 'fork'),
       max_memory_restart: process.env.PM2_MAX_MEMORY || '512M',
 
       // Reload más limpio: espera "ready" y da tiempo a cerrar WS/Mongo

@@ -3,6 +3,7 @@
  * Todo mensaje entrante/saliente pasa por aquí → MongoDB + tiempo real.
  */
 
+const mongoose = require('mongoose');
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const { AGENTS_DASHBOARD_ROOM } = require('./socketRooms');
@@ -11,7 +12,9 @@ const {
   toMessageData,
   mapMessagesToData
 } = require('./messageHelpers');
-const { NOTIFICATIONS_API_URL, NOTIFICATIONS_API_KEY } = require('./env');
+const { enqueueWebhook } = require('./webhooks');
+const { asObjectId, asDate, clampInt } = require('./validate');
+const { notFound, badRequest } = require('./errors');
 const logger = require('./logger');
 
 const DELIVERY_CHANNELS = {
@@ -24,14 +27,20 @@ const DELIVERY_CHANNELS = {
 const JOIN_CHAT_MESSAGE_LIMIT = Number(process.env.JOIN_CHAT_MESSAGE_LIMIT) || 50;
 const DEFAULT_HISTORY_LIMIT = 500;
 const MAX_HISTORY_LIMIT = 2000;
+/** Máximo por página en sockets (join/load_older): evita respuestas gigantes por WS. */
+const MAX_SOCKET_PAGE = 200;
 
-async function loadConversation(conversationId) {
-  const conversation = await Conversation.findById(conversationId).populate('platformId');
-  if (!conversation) {
-    const err = new Error('Conversación no encontrada');
-    err.status = 404;
-    throw err;
-  }
+function requireConversationId(conversationId) {
+  const id = asObjectId(conversationId);
+  if (!id) throw badRequest('conversationId inválido');
+  return id;
+}
+
+async function loadConversation(conversationId, { lean = true } = {}) {
+  const id = requireConversationId(conversationId);
+  const query = Conversation.findById(id).populate('platformId', 'name');
+  const conversation = lean ? await query.lean() : await query;
+  if (!conversation) throw notFound('Conversación no encontrada');
   return conversation;
 }
 
@@ -43,14 +52,6 @@ function isMaracaiboConversation(conversation) {
   }
   const channel = conversation.sourceChannel || '';
   return channel.startsWith('maracaibo');
-}
-
-function scheduleAsync(task, label) {
-  setImmediate(() => {
-    Promise.resolve()
-      .then(task)
-      .catch((err) => logger.error('async_task_failed', { label, error: err.message }));
-  });
 }
 
 /**
@@ -73,7 +74,8 @@ async function recordMessage(
   const convId = conversation._id;
   const preview = getLastMessagePreview(messageType, content);
 
-  const [newMessage] = await Promise.all([
+  const now = new Date();
+  const [newMessage, updatedConversation] = await Promise.all([
     Message.create({
       conversationId: convId,
       senderType,
@@ -86,11 +88,17 @@ async function recordMessage(
       customerId: conversation.customerId,
       direction: senderType === 'customer' ? 'inbound' : 'outbound'
     }),
-    Conversation.findByIdAndUpdate(convId, {
-      lastMessage: preview,
-      updatedAt: new Date(),
-      ...(senderType === 'customer' ? { lastCustomerMessageAt: new Date() } : {})
-    })
+    Conversation.findByIdAndUpdate(
+      convId,
+      {
+        lastMessage: preview,
+        updatedAt: now,
+        ...(senderType === 'customer' ? { lastCustomerMessageAt: now } : {})
+      },
+      { returnDocument: 'after' }
+    )
+      .populate('platformId', 'name')
+      .lean()
   ]);
 
   const messageData = toMessageData(newMessage, convId);
@@ -101,11 +109,9 @@ async function recordMessage(
     const agentNamespace = io.of('/agent');
 
     if (senderType === 'customer') {
-      // Room + broadcast global: el panel de tickets escucha new_message
-      // aunque el agente no haya hecho join de esa conversación.
-      agentNamespace.to(roomId).emit('new_message', messageData);
-      // Sala dashboard: agentes del panel reciben el mensaje sin abrir el chat.
-      agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('new_message', messageData);
+      // Sala de la conversación + dashboard en una sola emisión: Socket.io deduplica,
+      // así un agente que está en ambas salas recibe el mensaje UNA vez.
+      agentNamespace.to([roomId, AGENTS_DASHBOARD_ROOM]).emit('new_message', messageData);
       agentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('conversation_message_received', {
         conversationId: roomId,
         lastMessage: preview,
@@ -133,20 +139,18 @@ async function recordMessage(
 
     logger.info('ticket_notify_queued', {
       ticketId,
-      maracaibo: isMaracaiboConversation(conversation),
+      maracaibo: isMaracaiboConversation(updatedConversation || conversation),
     });
-    scheduleAsync(
-      () => sendExternalNotification(ticketId, 'mensaje', null, customMessage),
-      `notificar ticket ${ticketId}`
-    );
+    sendExternalNotification(ticketId, 'mensaje', null, customMessage);
   } else if (senderType === 'customer') {
     logger.warn('customer_message_without_ticket', { conversationId: String(convId) });
   }
 
-  return { message: messageData, conversation };
+  return { message: messageData, conversation: updatedConversation || conversation };
 }
 
 async function findConversationByTicketId(ticketId, { activeOnly = false } = {}) {
+  if (typeof ticketId !== 'string' && typeof ticketId !== 'number') return null;
   const id = String(ticketId).trim();
   if (!id) return null;
 
@@ -160,20 +164,15 @@ async function findConversationByTicketId(ticketId, { activeOnly = false } = {})
   return Conversation.findOne({ externalTicketId: id }).sort({ updatedAt: -1 });
 }
 
-function parseHistoryQuery(query) {
-  const limit = Math.min(
-    Math.max(parseInt(query.limit, 10) || DEFAULT_HISTORY_LIMIT, 1),
-    MAX_HISTORY_LIMIT
-  );
-  const skip = Math.max(parseInt(query.skip, 10) || 0, 0);
+function parseHistoryQuery(query = {}) {
+  const limit = clampInt(query.limit, { min: 1, max: MAX_HISTORY_LIMIT, fallback: DEFAULT_HISTORY_LIMIT });
+  const skip = clampInt(query.skip, { min: 0, max: 1_000_000, fallback: 0 });
   const filter = {};
 
-  if (query.after) {
-    filter.timestamp = { ...filter.timestamp, $gte: new Date(query.after) };
-  }
-  if (query.before) {
-    filter.timestamp = { ...filter.timestamp, $lte: new Date(query.before) };
-  }
+  const after = asDate(query.after);
+  const before = asDate(query.before);
+  if (after) filter.timestamp = { ...filter.timestamp, $gte: after };
+  if (before) filter.timestamp = { ...filter.timestamp, $lte: before };
   if (query.senderType === 'customer' || query.senderType === 'agent') {
     filter.senderType = query.senderType;
   }
@@ -184,24 +183,64 @@ function parseHistoryQuery(query) {
   return { limit, skip, filter };
 }
 
-async function fetchMessagesForConversation(conversationId, query = {}) {
-  const { limit, skip, filter } = parseHistoryQuery(query);
-  const baseFilter = { conversationId, ...filter };
+/** Estadísticas sobre TODO el filtro (no solo la página) en una sola agregación. */
+async function aggregateMessageStats(baseFilter) {
+  const inboundExpr = {
+    $eq: [
+      { $ifNull: ['$direction', { $cond: [{ $eq: ['$senderType', 'customer'] }, 'inbound', 'outbound'] }] },
+      'inbound'
+    ]
+  };
+  const countIf = (cond) => ({ $sum: { $cond: [cond, 1, 0] } });
 
-  const [messages, total] = await Promise.all([
-    Message.find(baseFilter).sort({ timestamp: 1 }).skip(skip).limit(limit),
-    Message.countDocuments(baseFilter)
+  const [row] = await Message.aggregate([
+    { $match: baseFilter },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        fromCustomer: countIf({ $eq: ['$senderType', 'customer'] }),
+        fromAgent: countIf({ $eq: ['$senderType', 'agent'] }),
+        imageCount: countIf({ $eq: ['$messageType', 'image'] }),
+        inbound: countIf(inboundExpr)
+      }
+    }
   ]);
 
-  return { messages, total, limit, skip };
+  if (!row) {
+    return { total: 0, fromCustomer: 0, fromAgent: 0, textCount: 0, imageCount: 0, inbound: 0, outbound: 0 };
+  }
+  return {
+    total: row.total,
+    fromCustomer: row.fromCustomer,
+    fromAgent: row.fromAgent,
+    textCount: row.total - row.imageCount,
+    imageCount: row.imageCount,
+    inbound: row.inbound,
+    outbound: row.total - row.inbound
+  };
+}
+
+async function fetchMessagesForConversation(conversationId, query = {}) {
+  const id = requireConversationId(conversationId);
+  const { limit, skip, filter } = parseHistoryQuery(query);
+  const baseFilter = { conversationId: new mongoose.Types.ObjectId(id), ...filter };
+
+  const [messages, stats] = await Promise.all([
+    Message.find(baseFilter).sort({ timestamp: 1 }).skip(skip).limit(limit).lean(),
+    aggregateMessageStats(baseFilter)
+  ]);
+
+  return { messages, total: stats.total, stats, limit, skip };
 }
 
 /** Últimos N mensajes en orden cronológico (para join_chat). */
 async function fetchRecentMessagesForConversation(conversationId, limit = JOIN_CHAT_MESSAGE_LIMIT) {
-  const capped = Math.min(Math.max(parseInt(limit, 10) || JOIN_CHAT_MESSAGE_LIMIT, 1), MAX_HISTORY_LIMIT);
+  const capped = clampInt(limit, { min: 1, max: MAX_SOCKET_PAGE, fallback: JOIN_CHAT_MESSAGE_LIMIT });
   const messages = await Message.find({ conversationId })
     .sort({ timestamp: -1 })
-    .limit(capped);
+    .limit(capped)
+    .lean();
   messages.reverse();
   return messages;
 }
@@ -212,31 +251,20 @@ async function fetchOlderMessagesForConversation(
   before,
   limit = JOIN_CHAT_MESSAGE_LIMIT
 ) {
-  if (!before) {
+  const beforeDate = asDate(before);
+  if (!beforeDate) {
     return { messages: [], hasMore: false };
   }
-  const capped = Math.min(Math.max(parseInt(limit, 10) || JOIN_CHAT_MESSAGE_LIMIT, 1), MAX_HISTORY_LIMIT);
+  const capped = clampInt(limit, { min: 1, max: MAX_SOCKET_PAGE, fallback: JOIN_CHAT_MESSAGE_LIMIT });
   const messages = await Message.find({
     conversationId,
-    timestamp: { $lt: new Date(before) }
+    timestamp: { $lt: beforeDate }
   })
     .sort({ timestamp: -1 })
-    .limit(capped);
+    .limit(capped)
+    .lean();
   messages.reverse();
   return { messages, hasMore: messages.length === capped };
-}
-
-function computeMessageStats(messages) {
-  const formatted = mapMessagesToData(messages);
-  return {
-    total: formatted.length,
-    fromCustomer: formatted.filter((m) => m.senderType === 'customer').length,
-    fromAgent: formatted.filter((m) => m.senderType === 'agent').length,
-    textCount: formatted.filter((m) => m.messageType === 'text').length,
-    imageCount: formatted.filter((m) => m.messageType === 'image').length,
-    inbound: formatted.filter((m) => m.direction === 'inbound').length,
-    outbound: formatted.filter((m) => m.direction === 'outbound').length
-  };
 }
 
 function buildStructuredHistory(conversation, messages, meta = {}) {
@@ -254,7 +282,7 @@ function buildStructuredHistory(conversation, messages, meta = {}) {
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt
     },
-    stats: computeMessageStats(messages),
+    stats: meta.stats,
     pagination: {
       total: meta.total ?? formatted.length,
       limit: meta.limit ?? formatted.length,
@@ -266,9 +294,11 @@ function buildStructuredHistory(conversation, messages, meta = {}) {
 }
 
 async function getConversationHistory(conversationId, query = {}) {
-  const conversation = await loadConversation(conversationId);
-  const { messages, total, limit, skip } = await fetchMessagesForConversation(conversationId, query);
-  return buildStructuredHistory(conversation, messages, { total, limit, skip });
+  const [conversation, page] = await Promise.all([
+    loadConversation(conversationId),
+    fetchMessagesForConversation(conversationId, query)
+  ]);
+  return buildStructuredHistory(conversation, page.messages, page);
 }
 
 /**
@@ -280,8 +310,14 @@ async function getConversationHistory(conversationId, query = {}) {
  * @param {{ messageId?: string }} [options] — sin messageId = todos los no leídos
  */
 async function markMessagesReadByCustomer(conversationId, io, options = {}) {
-  const { messageId } = options;
-  const convId = String(conversationId);
+  const convId = asObjectId(String(conversationId));
+  if (!convId) return null;
+
+  let messageId;
+  if (options.messageId !== undefined && options.messageId !== null && options.messageId !== '') {
+    messageId = asObjectId(options.messageId);
+    if (!messageId) return null;
+  }
 
   const filter = {
     conversationId: convId,
@@ -292,17 +328,15 @@ async function markMessagesReadByCustomer(conversationId, io, options = {}) {
     filter._id = messageId;
   }
 
-  // Early exit barato: sin unread → sin update ni webhook
-  const hasUnread = await Message.exists(filter);
-  if (!hasUnread) return null;
-
-  const conversation = await Conversation.findById(conversationId).select('externalTicketId');
-  if (!conversation) return null;
-
   const readAt = new Date();
   const readAtIso = readAt.toISOString();
 
-  await Message.updateMany(filter, { $set: { readByCustomerAt: readAt } });
+  // Un solo round-trip: si no había no leídos, modifiedCount = 0 → sin evento ni webhook
+  const { modifiedCount } = await Message.updateMany(filter, { $set: { readByCustomerAt: readAt } });
+  if (!modifiedCount) return null;
+
+  const conversation = await Conversation.findById(convId).select('externalTicketId').lean();
+  if (!conversation) return null;
 
   const ticketId = String(conversation.externalTicketId || '').trim();
   const isSingle = !!messageId;
@@ -323,16 +357,12 @@ async function markMessagesReadByCustomer(conversationId, io, options = {}) {
   }
 
   if (ticketId) {
-    scheduleAsync(
-      () =>
-        sendReadReceiptNotification({
-          ticketId,
-          conversationId: convId,
-          readAt: readAtIso,
-          messageId: isSingle ? String(messageId) : undefined
-        }),
-      `lectura ticket ${ticketId}`
-    );
+    sendReadReceiptNotification({
+      ticketId,
+      conversationId: convId,
+      readAt: readAtIso,
+      messageId: isSingle ? String(messageId) : undefined
+    });
   }
 
   return payload;
@@ -341,20 +371,19 @@ async function markMessagesReadByCustomer(conversationId, io, options = {}) {
 async function getTicketHistory(ticketId, query = {}) {
   const conversation = await findConversationByTicketId(ticketId, { activeOnly: false });
   if (!conversation) {
-    const err = new Error(`No hay conversación para el ticket "${ticketId}"`);
-    err.status = 404;
-    throw err;
+    throw notFound(`No hay conversación para el ticket "${ticketId}"`);
   }
 
-  const { messages, total, limit, skip } = await fetchMessagesForConversation(conversation._id, query);
-  return buildStructuredHistory(conversation, messages, { total, limit, skip });
+  const page = await fetchMessagesForConversation(String(conversation._id), query);
+  return buildStructuredHistory(conversation, page.messages, page);
 }
 
 /**
  * Webhook de recibos de lectura → Sistema de Tickets (persistencia).
  * Tipos: mensajes_leidos (todos) | mensaje_leido (uno).
+ * Se encola: timeout + reintentos, no bloquea el flujo del chat.
  */
-async function sendReadReceiptNotification({ ticketId, conversationId, readAt, messageId }) {
+function sendReadReceiptNotification({ ticketId, conversationId, readAt, messageId }) {
   const type = messageId ? 'mensaje_leido' : 'mensajes_leidos';
 
   const payload = {
@@ -367,73 +396,25 @@ async function sendReadReceiptNotification({ ticketId, conversationId, readAt, m
     payload.messageId = messageId;
   }
 
-  logger.info('read_receipt_webhook', { ticketId, type });
-
-  try {
-    const response = await fetch(NOTIFICATIONS_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': NOTIFICATIONS_API_KEY
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      logger.warn('read_receipt_webhook_failed', {
-        ticketId,
-        status: response.status,
-        body: errorText.slice(0, 200)
-      });
-    } else {
-      logger.info('read_receipt_webhook_ok', { ticketId, type });
-    }
-  } catch (error) {
-    logger.error('read_receipt_webhook_error', { ticketId, error: error.message });
-  }
+  logger.info('read_receipt_webhook_queued', { ticketId, type });
+  return enqueueWebhook(payload, `lectura ticket ${ticketId}`);
 }
 
 /**
- * Envía una notificación HTTP POST a la API externa de notificaciones.
- * No arroja excepciones para evitar romper el flujo principal del chat si el servidor de notificaciones falla.
+ * Notificación al Sistema de Tickets. Se encola (no lanza excepciones): si el servidor de
+ * notificaciones falla, se reintenta con backoff sin romper el flujo del chat.
  */
-async function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
-  const messageText = customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`;
-  logger.info('ticket_notification', { ticketId, type });
-
-  try {
-    const payload = {
-      ticketId,
-      type,
-      message: messageText
-    };
-    if (status) {
-      payload.status = status;
-    }
-
-    const response = await fetch(NOTIFICATIONS_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': NOTIFICATIONS_API_KEY
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      logger.warn('ticket_notification_failed', {
-        ticketId,
-        status: response.status,
-        body: errorText.slice(0, 200)
-      });
-    } else {
-      logger.info('ticket_notification_ok', { ticketId, type });
-    }
-  } catch (error) {
-    logger.error('ticket_notification_error', { ticketId, error: error.message });
+function sendExternalNotification(ticketId, type = 'mensaje', status = null, customMessage = null) {
+  const payload = {
+    ticketId,
+    type,
+    message: customMessage || `Hey, tienes un mensaje en el ticket ${ticketId}`
+  };
+  if (status) {
+    payload.status = status;
   }
+  logger.info('ticket_notification_queued', { ticketId, type });
+  return enqueueWebhook(payload, `notificar ticket ${ticketId}`);
 }
 
 module.exports = {

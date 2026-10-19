@@ -25,8 +25,8 @@ services:
       - key: BUCKET_FOLDER
         value: ticket_chat
       - key: NOTIFICATIONS_API_URL
-        value: https://ticketsotravez-1.onrender.com/notifications/ticket
+        value: https://TU-TICKETS.up.railway.app/notifications/ticket
       - key: NOTIFICATIONS_API_KEY
-        value: tickets_secret_key_2026
+        sync: false
       - key: TRUST_PROXY_HOPS
         value: "1"

@@ -9,14 +9,49 @@
 const Department = require('../models/Department');
 const Appointment = require('../models/Appointment');
 const Conversation = require('../models/Conversation');
+const crypto = require('crypto');
 const logger = require('./logger');
 const { AGENTS_DASHBOARD_ROOM, getDepartmentRoom } = require('./socketRooms');
+const { asString, asObjectId, clampInt, escapeRegex } = require('./validate');
+const { badRequest, notFound, conflict } = require('./errors');
 
-// Generador de código único de cita (ej. CPU-2026-8941)
-function generateAppointmentCode() {
+const DEFAULT_SLOTS = [
+  '08:00 - 09:00',
+  '09:00 - 10:00',
+  '10:00 - 11:00',
+  '11:00 - 12:00',
+  '13:00 - 14:00',
+  '14:00 - 15:00',
+  '15:00 - 16:00'
+];
+
+const RESOLUTION_TYPES = ['RESUELTO_ONLINE', 'CONFIRMADA_PRESENCIAL', 'RECHAZADO', 'CANCELADA'];
+const CODE_ATTEMPTS = 8;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Código único de cita (ej. CPU-2026-8941). Formato de 4 dígitos por compatibilidad;
+ * tras varias colisiones se amplía a 6 dígitos para no bloquear cuando el año se llena.
+ */
+function generateAppointmentCode(digits = 4) {
   const year = new Date().getFullYear();
-  const randomDigits = Math.floor(1000 + Math.random() * 9000);
+  const min = 10 ** (digits - 1);
+  const randomDigits = crypto.randomInt(min, min * 10);
   return `CPU-${year}-${randomDigits}`;
+}
+
+/**
+ * Ventana [inicio, fin) del día calendario en UTC — igual que se guardan las fechas "YYYY-MM-DD"
+ * (independiente de la zona horaria del servidor).
+ */
+function getUtcDayWindow(dateInput) {
+  const str = asString(dateInput, { max: 40 });
+  if (!str || !/^\d{4}-\d{2}-\d{2}/.test(str)) {
+    throw badRequest('Fecha inválida (use YYYY-MM-DD)');
+  }
+  const start = new Date(`${str.slice(0, 10)}T00:00:00.000Z`);
+  if (Number.isNaN(start.getTime())) throw badRequest('Fecha inválida (use YYYY-MM-DD)');
+  return { start, end: new Date(start.getTime() + DAY_MS) };
 }
 
 /**
@@ -69,13 +104,17 @@ async function seedDepartmentsIfEmpty() {
       }
     ];
 
-    for (const dept of defaultDepartments) {
-      await Department.findOneAndUpdate(
-        { code: dept.code },
-        { $set: dept },
-        { upsert: true, returnDocument: 'after' }
-      );
-    }
+    // $setOnInsert: crea los que falten sin pisar cambios hechos en la BDD (capacidad, jefe, etc.)
+    await Department.bulkWrite(
+      defaultDepartments.map((dept) => ({
+        updateOne: {
+          filter: { code: dept.code },
+          update: { $setOnInsert: dept },
+          upsert: true
+        }
+      })),
+      { ordered: false }
+    );
     logger.info('auto_seed_departments_done');
   } catch (err) {
     logger.error('auto_seed_departments_failed', { error: err.message });
@@ -112,6 +151,8 @@ function normalizeAppointmentForFrontend(app) {
   const dept = obj.departmentId;
   const deptCode = (dept && typeof dept === 'object' && dept.code) ? dept.code : '';
   const deptSlug = CODE_TO_SLUG[deptCode] || deptCode.toLowerCase() || (dept ? String(dept) : '');
+  const conv = obj.conversationId;
+  const conversationId = conv ? String(conv._id || conv) : null;
 
   const fullName = obj.taxpayer?.name || '';
   const parts = fullName.trim().split(/\s+/);
@@ -139,7 +180,7 @@ function normalizeAppointmentForFrontend(app) {
     resolvedBy: obj.resolution?.resolvedBy || '',
     resolutionType: obj.resolution?.resolutionType || '',
     // conversationId como string
-    conversationId: obj.conversationId ? obj.conversationId.toString() : null,
+    conversationId,
   };
   // Eliminar _id duplicado para no confundir al frontend
   delete normalized._id;
@@ -147,57 +188,56 @@ function normalizeAppointmentForFrontend(app) {
 }
 
 async function resolveDepartmentDoc(deptId) {
-  if (!deptId) return null;
-  const mongoose = require('mongoose');
-  if (mongoose.Types.ObjectId.isValid(deptId)) {
-    const doc = await Department.findById(deptId);
+  const objectId = asObjectId(deptId);
+  if (objectId) {
+    const doc = await Department.findById(objectId);
     if (doc) return doc;
   }
-  const str = String(deptId).trim();
+  const str = asString(deptId, { max: 64 });
+  if (!str) return null;
   const code = SLUG_TO_CODE[str.toLowerCase()] || str.toUpperCase();
-  const doc = await Department.findOne({
-    $or: [{ code: code }, { name: new RegExp(str, 'i') }]
+  // Regex escapado: la entrada del usuario nunca se interpreta como patrón (ReDoS)
+  return Department.findOne({
+    $or: [{ code }, { name: new RegExp(escapeRegex(str), 'i') }]
   });
-  return doc;
+}
+
+async function countActiveBookings(departmentObjectId, { start, end }, slot) {
+  const filter = {
+    departmentId: departmentObjectId,
+    requestedDate: { $gte: start, $lt: end },
+    status: { $ne: 'CANCELADA' }
+  };
+  if (slot) filter.requestedTimeSlot = slot;
+  return Appointment.countDocuments(filter);
 }
 
 /**
  * Obtener disponibilidad de horarios para un departamento y fecha específica.
  */
 async function getDepartmentAvailability(departmentId, dateStr) {
+  const window = getUtcDayWindow(dateStr);
   const dept = await resolveDepartmentDoc(departmentId);
   if (!dept || !dept.active) {
-    throw new Error('Departamento no encontrado o inactivo');
+    throw notFound('Departamento no encontrado o inactivo');
   }
 
-  const targetDate = new Date(dateStr);
-  const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
-  const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
+  // Contar citas por horario con el _id real del departamento (antes se usaba el slug crudo
+  // y nunca encontraba reservas → todo aparecía disponible).
+  const usage = await Appointment.aggregate([
+    {
+      $match: {
+        departmentId: dept._id,
+        requestedDate: { $gte: window.start, $lt: window.end },
+        status: { $ne: 'CANCELADA' }
+      }
+    },
+    { $group: { _id: '$requestedTimeSlot', count: { $sum: 1 } } }
+  ]);
 
-  // Bloques de horario predeterminados
-  const defaultSlots = [
-    '08:00 - 09:00',
-    '09:00 - 10:00',
-    '10:00 - 11:00',
-    '11:00 - 12:00',
-    '13:00 - 14:00',
-    '14:00 - 15:00',
-    '15:00 - 16:00'
-  ];
+  const slotsUsage = Object.fromEntries(usage.map((u) => [u._id, u.count]));
 
-  // Contar citas ya agendadas por horario en esa fecha
-  const existingAppointments = await Appointment.find({
-    departmentId,
-    requestedDate: { $gte: startOfDay, $lte: endOfDay },
-    status: { $nin: ['CANCELADA'] }
-  });
-
-  const slotsUsage = {};
-  existingAppointments.forEach(app => {
-    slotsUsage[app.requestedTimeSlot] = (slotsUsage[app.requestedTimeSlot] || 0) + 1;
-  });
-
-  const availability = defaultSlots.map(slot => {
+  const availability = DEFAULT_SLOTS.map(slot => {
     const booked = slotsUsage[slot] || 0;
     const available = Math.max(0, dept.capacityPerHour - booked);
     return {
@@ -236,59 +276,118 @@ async function createAppointment(data, ioAgentNamespace = null) {
     createChatConversation = true
   } = data;
 
-  if (!departmentId || !taxpayer || !taxpayer.name || !taxpayer.cedulaRif || !taxpayer.email || !taxpayer.phone || !subject || !requestedDate || !requestedTimeSlot) {
-    throw new Error('Todos los campos obligatorios deben ser proporcionados.');
+  const clean = {
+    name: asString(taxpayer?.name, { max: 200 }),
+    cedulaRif: asString(taxpayer?.cedulaRif, { max: 40 }),
+    email: asString(taxpayer?.email, { max: 200 }),
+    phone: asString(taxpayer?.phone, { max: 40 }),
+    subject: asString(subject, { max: 300 }),
+    slot: asString(requestedTimeSlot, { max: 40 })
+  };
+  const missing = Object.entries({
+    departmentId,
+    'taxpayer.name': clean.name,
+    'taxpayer.cedulaRif': clean.cedulaRif,
+    'taxpayer.email': clean.email,
+    'taxpayer.phone': clean.phone,
+    subject: clean.subject,
+    requestedDate,
+    requestedTimeSlot: clean.slot
+  })
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length) {
+    throw badRequest(`Todos los campos obligatorios deben ser proporcionados. Faltan: ${missing.join(', ')}`);
+  }
+  if (typeof description !== 'string' || description.length > 4000) {
+    throw badRequest('description debe ser texto (máx 4000 caracteres)');
+  }
+  if (!Array.isArray(attachments) || attachments.length > 10) {
+    throw badRequest('attachments debe ser una lista (máx 10)');
+  }
+
+  const requested = new Date(requestedDate);
+  if (Number.isNaN(requested.getTime())) {
+    throw badRequest('requestedDate inválida');
   }
 
   const dept = await resolveDepartmentDoc(departmentId);
   if (!dept || !dept.active) {
-    throw new Error('El departamento seleccionado no es válido o está inactivo.');
+    throw badRequest('El departamento seleccionado no es válido o está inactivo.');
   }
 
-  // Generar código único de cita
-  let code = generateAppointmentCode();
-  let exists = await Appointment.findOne({ appointmentCode: code });
-  while (exists) {
-    code = generateAppointmentCode();
-    exists = await Appointment.findOne({ appointmentCode: code });
+  if (!DEFAULT_SLOTS.includes(clean.slot)) {
+    logger.warn('appointment_unknown_slot', { slot: clean.slot, dept: dept.code });
   }
 
-  // Crear conversación de chat opcional para el seguimiento en tiempo real
-  let conversation = null;
-  if (createChatConversation && platformId) {
-    conversation = await Conversation.create({
-      platformId,
-      customerName: taxpayer.name,
-      customerId: taxpayer.cedulaRif,
-      externalTicketId: code,
-      sourceChannel: 'maracaibo_web',
-      metadata: {
-        departmentName: dept.name,
-        subject,
-        appointmentCode: code
-      },
-      lastMessage: `Cita solicitada: ${subject} (${dept.name})`
-    });
+  // Control de capacidad: no se permite sobre-agendar un horario
+  const booked = await countActiveBookings(dept._id, getUtcDayWindow(requested.toISOString()), clean.slot);
+  if (booked >= dept.capacityPerHour) {
+    throw conflict(`El horario ${clean.slot} ya no tiene cupos disponibles para ${dept.name}.`);
   }
 
-  const appointment = await Appointment.create({
-    appointmentCode: code,
-    platformId,
+  const validPlatformId = asObjectId(platformId);
+  const baseDoc = {
+    platformId: validPlatformId,
     departmentId: dept._id,
     taxpayer: {
-      name: taxpayer.name.trim(),
-      cedulaRif: taxpayer.cedulaRif.trim(),
-      email: taxpayer.email.trim(),
-      phone: taxpayer.phone.trim()
+      name: clean.name,
+      cedulaRif: clean.cedulaRif,
+      email: clean.email,
+      phone: clean.phone
     },
-    subject: subject.trim(),
+    subject: clean.subject,
     description: description.trim(),
-    attachments,
-    requestedDate: new Date(requestedDate),
-    requestedTimeSlot,
-    status: 'PENDIENTE',
-    conversationId: conversation ? conversation._id : null
-  });
+    attachments: attachments
+      .filter((a) => a && typeof a === 'object')
+      .map((a) => ({
+        url: asString(a.url, { max: 2048 }) || '',
+        filename: asString(a.filename, { max: 255 }) || '',
+        mimeType: asString(a.mimeType, { max: 100 }) || ''
+      })),
+    requestedDate: requested,
+    requestedTimeSlot: clean.slot,
+    status: 'PENDIENTE'
+  };
+
+  // Código único: se confía en el índice único (sin carrera check-then-insert) y se reintenta
+  let appointment = null;
+  for (let attempt = 0; attempt < CODE_ATTEMPTS && !appointment; attempt++) {
+    const code = generateAppointmentCode(attempt < CODE_ATTEMPTS / 2 ? 4 : 6);
+    try {
+      appointment = await Appointment.create({ ...baseDoc, appointmentCode: code });
+    } catch (err) {
+      if (err?.code !== 11000) throw err;
+    }
+  }
+  if (!appointment) {
+    throw new Error('No se pudo generar un código de cita único');
+  }
+  const code = appointment.appointmentCode;
+
+  // Conversación de chat opcional para seguimiento en tiempo real (tras crear la cita:
+  // si la cita falla no quedan conversaciones huérfanas)
+  if (createChatConversation && validPlatformId) {
+    try {
+      const conversation = await Conversation.create({
+        platformId: validPlatformId,
+        customerName: clean.name,
+        customerId: clean.cedulaRif,
+        externalTicketId: code,
+        sourceChannel: 'maracaibo_web',
+        metadata: {
+          departmentName: dept.name,
+          subject: clean.subject,
+          appointmentCode: code
+        },
+        lastMessage: `Cita solicitada: ${clean.subject} (${dept.name})`
+      });
+      appointment.conversationId = conversation._id;
+      await appointment.save();
+    } catch (err) {
+      logger.error('appointment_conversation_failed', { code, error: err.message });
+    }
+  }
 
   const populatedAppointment = await Appointment.findById(appointment._id).populate('departmentId');
 
@@ -299,11 +398,10 @@ async function createAppointment(data, ioAgentNamespace = null) {
     const deptSlug = CODE_TO_SLUG[dept.code] || dept.code.toLowerCase();
     const deptRoom = getDepartmentRoom(deptSlug);
     const normalizedPayload = normalizeAppointmentForFrontend(populatedAppointment);
-    ioAgentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('appointment_created', normalizedPayload);
-    ioAgentNamespace.to(deptRoom).emit('appointment_created', normalizedPayload);
+    ioAgentNamespace.to([AGENTS_DASHBOARD_ROOM, deptRoom]).emit('appointment_created', normalizedPayload);
   }
 
-  logger.info('appointment_created', { code, dept: dept.name, taxpayer: taxpayer.cedulaRif });
+  logger.info('appointment_created', { code, dept: dept.name });
 
   return populatedAppointment;
 }
@@ -319,9 +417,15 @@ async function respondToAppointment(appointmentId, responseData, ioAgentNamespac
     qrCodeUrl = ''
   } = responseData;
 
-  const app = await Appointment.findById(appointmentId).populate('departmentId');
+  if (!RESOLUTION_TYPES.includes(resolutionType)) {
+    throw badRequest(`resolutionType inválido. Use: ${RESOLUTION_TYPES.join(', ')}`);
+  }
+  const id = asObjectId(appointmentId);
+  if (!id) throw badRequest('ID de cita inválido');
+
+  const app = await Appointment.findById(id).populate('departmentId');
   if (!app) {
-    throw new Error('Cita no encontrada.');
+    throw notFound('Cita no encontrada.');
   }
 
   let newStatus = app.status;
@@ -335,10 +439,10 @@ async function respondToAppointment(appointmentId, responseData, ioAgentNamespac
 
   app.status = newStatus;
   app.resolution = {
-    resolvedBy,
+    resolvedBy: asString(resolvedBy, { max: 200 }) || 'Jefe de Departamento',
     resolutionType,
-    notes,
-    qrCodeUrl: qrCodeUrl || (resolutionType === 'CONFIRMADA_PRESENCIAL' ? `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(app.appointmentCode)}` : ''),
+    notes: typeof notes === 'string' ? notes.slice(0, 4000) : '',
+    qrCodeUrl: asString(qrCodeUrl, { max: 2048 }) || (resolutionType === 'CONFIRMADA_PRESENCIAL' ? `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(app.appointmentCode)}` : ''),
     resolvedAt: new Date()
   };
 
@@ -347,7 +451,7 @@ async function respondToAppointment(appointmentId, responseData, ioAgentNamespac
   // Si tiene conversación de chat asociada, registrar la resolución como mensaje del sistema/agente
   if (app.conversationId) {
     await Conversation.findByIdAndUpdate(app.conversationId, {
-      lastMessage: `Respuesta de CPU (${resolutionType}): ${notes}`
+      lastMessage: `Respuesta de CPU (${resolutionType}): ${app.resolution.notes}`
     });
   }
 
@@ -356,12 +460,14 @@ async function respondToAppointment(appointmentId, responseData, ioAgentNamespac
   const normalizedPayload = normalizeAppointmentForFrontend(app);
 
   if (ioAgentNamespace) {
-    ioAgentNamespace.to(AGENTS_DASHBOARD_ROOM).emit('appointment_updated', normalizedPayload);
-    ioAgentNamespace.to(getDepartmentRoom(deptSlug)).emit('appointment_updated', normalizedPayload);
+    ioAgentNamespace
+      .to([AGENTS_DASHBOARD_ROOM, getDepartmentRoom(deptSlug)])
+      .emit('appointment_updated', normalizedPayload);
   }
 
+  // El ciudadano está en la sala = conversationId (sin prefijo "room_", que nunca coincidía)
   if (ioClientNamespace && app.conversationId) {
-    ioClientNamespace.to(`room_${app.conversationId}`).emit('appointment_updated', normalizedPayload);
+    ioClientNamespace.to(String(app.conversationId)).emit('appointment_updated', normalizedPayload);
   }
 
   logger.info('appointment_responded', { code: app.appointmentCode, resolutionType, status: newStatus });
@@ -373,11 +479,19 @@ async function respondToAppointment(appointmentId, responseData, ioAgentNamespac
  * Consultar cita por código público (ej. CPU-2026-8941) o Cédula/RIF.
  */
 async function getAppointmentByCode(code) {
-  return await Appointment.findOne({ appointmentCode: code.toUpperCase() }).populate('departmentId');
+  const clean = asString(code, { max: 40 });
+  if (!clean) return null;
+  return Appointment.findOne({ appointmentCode: clean.toUpperCase() }).populate('departmentId').lean();
 }
 
-async function getAppointmentsByTaxpayer(cedulaRif) {
-  return await Appointment.find({ 'taxpayer.cedulaRif': cedulaRif }).populate('departmentId').sort({ createdAt: -1 });
+async function getAppointmentsByTaxpayer(cedulaRif, { limit } = {}) {
+  const clean = asString(cedulaRif, { max: 40 });
+  if (!clean) return [];
+  return Appointment.find({ 'taxpayer.cedulaRif': clean })
+    .populate('departmentId')
+    .sort({ createdAt: -1 })
+    .limit(clampInt(limit, { min: 1, max: 200, fallback: 100 }))
+    .lean();
 }
 
 module.exports = {
@@ -391,4 +505,5 @@ module.exports = {
   resolveDepartmentDoc,
   normalizeAppointmentForFrontend,
   CODE_TO_SLUG,
+  DEFAULT_SLOTS,
 };

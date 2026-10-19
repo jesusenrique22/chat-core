@@ -8,9 +8,11 @@ const logger = require('./logger');
 function getMongooseOptions() {
   const isProd = process.env.NODE_ENV === 'production';
 
+  // Una sola instancia en Railway no necesita 50 conexiones: cada una ocupa RAM en el
+  // proceso (que Railway cobra) y una conexión en el servidor de Mongo.
   return {
-    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 50,
-    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 5,
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1,
     serverSelectionTimeoutMS:
       Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || (isProd ? 10000 : 5000),
     socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45000,
@@ -59,13 +61,14 @@ async function connectMongo(uri) {
 }
 
 /**
- * Cierre graceful para pm2 reload / SIGTERM.
- * Con 1 instancia hay una ventana breve; los clientes con reconnection se recuperan.
+ * Cierre graceful para pm2 reload / SIGTERM (Railway, Docker).
+ * Orden: dejar de aceptar conexiones → cerrar sockets → hooks (webhooks, Redis) → Mongo.
+ * @param {Array<() => Promise<void>|void>} [hooks] limpieza adicional
  */
-function registerShutdownHandlers(httpServer, io) {
+function registerShutdownHandlers(httpServer, io, hooks = []) {
   let shuttingDown = false;
 
-  const shutdown = (signal) => {
+  const shutdown = async (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info('shutdown_started', { signal });
@@ -76,38 +79,30 @@ function registerShutdownHandlers(httpServer, io) {
     }, Number(process.env.SHUTDOWN_TIMEOUT_MS) || 7000);
     if (typeof forceTimer.unref === 'function') forceTimer.unref();
 
-    httpServer.close((err) => {
-      if (err) logger.error('http_close_error', { error: err.message });
-      else logger.info('http_closed');
-    });
+    try {
+      // io.close() también cierra el servidor HTTP subyacente
+      await new Promise((resolve) => {
+        if (!io) return httpServer.close(() => resolve());
+        io.close(() => resolve());
+      });
+      logger.info('http_and_sockets_closed');
 
-    const afterSockets = () => {
-      mongoose
-        .disconnect()
-        .then(() => {
-          logger.info('mongo_disconnected');
-          clearTimeout(forceTimer);
-          process.exit(0);
-        })
-        .catch((e) => {
-          logger.error('mongo_disconnect_error', { error: e.message });
-          clearTimeout(forceTimer);
-          process.exit(1);
-        });
-    };
-
-    if (io) {
-      try {
-        io.close(() => {
-          logger.info('socketio_closed');
-          afterSockets();
-        });
-      } catch (e) {
-        logger.error('socketio_close_error', { error: e.message });
-        afterSockets();
+      for (const hook of hooks) {
+        try {
+          await hook();
+        } catch (e) {
+          logger.error('shutdown_hook_error', { error: e.message });
+        }
       }
-    } else {
-      afterSockets();
+
+      await mongoose.disconnect();
+      logger.info('mongo_disconnected');
+      clearTimeout(forceTimer);
+      process.exit(0);
+    } catch (e) {
+      logger.error('shutdown_error', { error: e.message });
+      clearTimeout(forceTimer);
+      process.exit(1);
     }
   };
 

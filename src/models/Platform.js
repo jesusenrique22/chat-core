@@ -27,7 +27,9 @@ const platformSchema = new mongoose.Schema({
   apiKey: {
     type: String,
     required: [true, 'La API Key es obligatoria'],
-    unique: true
+    unique: true,
+    // Nunca se devuelve en consultas/populate (evita filtrar la key en respuestas y eventos)
+    select: false
   },
   // Lista de orígenes (dominios) desde los cuales esta plataforma puede conectarse
   // Ejemplo: ["http://localhost:4000", "https://serviciosmaracaibo.com"]
