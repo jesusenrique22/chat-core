@@ -2,9 +2,11 @@
  * Autenticación de plataformas (API Key) para REST y Socket.io.
  *
  * - Caché en memoria de API Keys → evita una consulta a Mongo por request/conexión.
- * - AUTH_ENFORCE=true exige credenciales en rutas de agente (/agent, /api/conversations,
- *   bandeja de citas) y de ciudadano (citas). Con false (default) quedan abiertas como antes,
- *   pero si se envía una key válida se adjunta igualmente a req.platform / socket.platform.
+ * - Las rutas de agente (/agent, /api/conversations, bandeja de citas) y de plataforma (citas)
+ *   exigen siempre credenciales.
+ * - Agentes: API Key de agente (servidor a servidor) o token de agente firmado con
+ *   AGENT_TOKEN_SECRET (lo emite el panel de tickets al agente con sesión; nunca la API Key
+ *   en el navegador).
  * - CLIENT_TOKEN_SECRET (opcional): el socket /client debe enviar token = HMAC-SHA256(secret, "customerId:ticketId").
  */
 
@@ -20,10 +22,6 @@ const MAX_CACHE_ENTRIES = 1000;
 
 const keyCache = new Map(); // apiKey → { platform|null, expiresAt }
 let maracaiboCache = { platform: null, expiresAt: 0 };
-
-function isAuthEnforced() {
-  return process.env.AUTH_ENFORCE === 'true';
-}
 
 function getAgentApiKeys() {
   return (process.env.AGENT_API_KEYS || '')
@@ -133,33 +131,63 @@ async function resolveAgentIdentity(rawKey) {
  */
 function requireAuth(level = 'platform') {
   return async (req, _res, next) => {
-    const apiKey = getApiKeyFromRequest(req, { allowQuery: true });
-    const enforce = isAuthEnforced();
+    try {
+      const apiKey = getApiKeyFromRequest(req, { allowQuery: true });
+      if (!apiKey) return next(unauthorized('API Key requerida (header X-Api-Key)'));
 
-    if (!apiKey) {
-      return next(enforce ? unauthorized('API Key requerida (header X-Api-Key)') : undefined);
-    }
-
-    if (level === 'agent') {
-      const identity = await resolveAgentIdentity(apiKey);
-      if (identity) {
+      if (level === 'agent') {
+        const identity = await resolveAgentIdentity(apiKey);
+        if (!identity) return next(forbidden('API Key sin permisos de agente'));
         req.agent = identity;
         req.platform = identity.platform || null;
         return next();
       }
-      return next(enforce ? forbidden('API Key sin permisos de agente') : undefined);
-    }
 
-    const platform = await findPlatformByApiKey(apiKey);
-    if (platform) {
+      const platform = await findPlatformByApiKey(apiKey);
+      if (!platform) return next(forbidden('API Key no autorizada'));
       req.platform = platform;
       return next();
+    } catch (err) {
+      return next(err);
     }
-    return next(enforce ? forbidden('API Key no autorizada') : undefined);
   };
 }
 
-/** Middleware Socket.io para /agent. */
+/**
+ * Token de agente: "<payload base64url>.<firma hex>", payload = { sub, name, exp } (exp en segundos).
+ * Lo firma el panel de tickets con AGENT_TOKEN_SECRET; sin secreto configurado no se aceptan tokens.
+ */
+function signAgentToken({ sub, name }, ttlSec = 12 * 60 * 60) {
+  const secret = process.env.AGENT_TOKEN_SECRET || '';
+  if (!secret) throw new Error('AGENT_TOKEN_SECRET no configurado');
+  const payload = Buffer.from(
+    JSON.stringify({ sub: String(sub), name: String(name || ''), exp: Math.floor(Date.now() / 1000) + ttlSec })
+  ).toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+/** Devuelve { sub, name } si el token es válido y no venció; si no, null. */
+function verifyAgentToken(rawToken) {
+  const secret = process.env.AGENT_TOKEN_SECRET || '';
+  const token = asString(rawToken, { max: 2048 });
+  if (!secret || !token) return null;
+
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  if (!safeEqual(sig, expected)) return null;
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data?.sub || !Number.isFinite(data.exp) || data.exp * 1000 < Date.now()) return null;
+    return { sub: String(data.sub), name: asString(data.name, { max: 120 }) || '' };
+  } catch {
+    return null;
+  }
+}
+
+/** Middleware Socket.io para /agent: API Key de agente o token de agente firmado. */
 async function agentSocketAuth(socket, next) {
   const auth = socket.handshake.auth || {};
   const apiKey = asString(auth.apiKey, { max: 512 }) || asString(socket.handshake.headers['x-api-key'], { max: 512 });
@@ -171,13 +199,20 @@ async function agentSocketAuth(socket, next) {
       socket.agentName = asString(auth.agentName, { max: 120 }) || 'Agente';
       return next();
     }
-    if (isAuthEnforced()) {
-      logger.warn('agent_socket_auth_rejected', { hasKey: !!apiKey, ip: socket.handshake.address });
-      return next(new Error('Autenticación fallida: API Key de agente requerida'));
+
+    const tokenAgent = verifyAgentToken(auth.token);
+    if (tokenAgent) {
+      socket.agent = { kind: 'agent_token', sub: tokenAgent.sub };
+      socket.agentName = tokenAgent.name || 'Agente';
+      return next();
     }
-    socket.agent = null;
-    socket.agentName = 'Agente';
-    return next();
+
+    logger.warn('agent_socket_auth_rejected', {
+      hasKey: !!apiKey,
+      hasToken: !!auth.token,
+      ip: socket.handshake.address
+    });
+    return next(new Error('Autenticación fallida: credencial de agente requerida'));
   } catch (err) {
     logger.error('agent_socket_auth_error', { error: err.message });
     return next(new Error('Error interno del servidor en autenticación'));
@@ -201,7 +236,6 @@ function verifyClientToken(customerId, ticketId, token) {
 }
 
 module.exports = {
-  isAuthEnforced,
   isMaracaiboPlatform,
   isTicketsPlatform,
   invalidatePlatformCache,
@@ -212,6 +246,8 @@ module.exports = {
   resolveAgentIdentity,
   requireAuth,
   agentSocketAuth,
+  signAgentToken,
+  verifyAgentToken,
   signClientToken,
   verifyClientToken
 };

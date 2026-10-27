@@ -37,13 +37,13 @@ pnpm run test:hardening   # seguridad + regresión contra server.js real (Mongo 
 |-------|------|
 | REST `/api/integrations/*`, `/api/uploads/image` | `X-Api-Key` de plataforma |
 | Socket `/client` | `auth.apiKey` + datos de cliente (+ `auth.token` si hay `CLIENT_TOKEN_SECRET`) |
-| Socket `/agent` | `auth.apiKey` de agente — obligatorio con `AUTH_ENFORCE=true` |
-| REST `/api/conversations*`, bandeja/respuesta de citas | `X-Api-Key` de agente — obligatorio con `AUTH_ENFORCE=true` |
-| REST crear/consultar citas, departamentos | `X-Api-Key` de plataforma — obligatorio con `AUTH_ENFORCE=true` |
+| Socket `/agent` | `auth.apiKey` de agente, o `auth.token` firmado con `AGENT_TOKEN_SECRET` (panel de tickets) |
+| REST `/api/conversations*`, bandeja/respuesta de citas | `X-Api-Key` de agente |
+| REST crear/consultar citas, departamentos | `X-Api-Key` de plataforma |
 
 Key de agente = la del **Sistema de Tickets** o una de `AGENT_API_KEYS`.
-`AUTH_ENFORCE=false` (default) mantiene compatibilidad mientras los frontends se actualizan;
-en producción se registra un aviso `insecure_config` hasta activarlo.
+El navegador del agente nunca recibe la API Key: el panel le emite un token de corta duración
+(`AGENT_TOKEN_SECRET`, mismo valor en chat-core y en el panel).
 
 Los webhooks al Sistema de Tickets van por una cola persistente en Mongo (`webhookjobs`)
 con timeout y reintentos con backoff: no se pierden si Tickets cae o el proceso se reinicia.

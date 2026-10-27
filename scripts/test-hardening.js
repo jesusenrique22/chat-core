@@ -2,9 +2,7 @@
  * Pruebas de seguridad / robustez contra el server.js REAL.
  * No toca ninguna BDD externa: usa mongodb-memory-server y un webhook falso local.
  *
- * Ejecuta dos rondas:
- *   1. AUTH_ENFORCE=false (modo compatible, por defecto)
- *   2. AUTH_ENFORCE=true  (modo seguro)
+ * La autenticación es siempre obligatoria (no hay modo "compatible").
  *
  * Uso: npm run test:hardening
  */
@@ -13,10 +11,18 @@ const { spawn } = require('child_process');
 const http = require('http');
 const path = require('path');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const crypto = require('crypto');
 const ioClient = require('socket.io-client');
 
 const MARACAIBO_KEY = 'maracaibo_secret_key_2026';
 const TICKETS_KEY = 'tickets_secret_key_2026';
+const AGENT_TOKEN_SECRET = 'test-agent-token-secret';
+
+/** Misma firma que el panel de tickets (lib/chatAgentToken). */
+function agentToken({ sub = 'agente-1', name = 'Ana Agente', ttlSec = 3600, secret = AGENT_TOKEN_SECRET } = {}) {
+  const payload = Buffer.from(JSON.stringify({ sub, name, exp: Math.floor(Date.now() / 1000) + ttlSec })).toString('base64url');
+  return `${payload}.${crypto.createHmac('sha256', secret).update(payload).digest('hex')}`;
+}
 
 let passed = 0;
 let failed = 0;
@@ -128,9 +134,9 @@ function collect(socket, event) {
 }
 
 // ---------------------------------------------------------------------------
-// Ronda 1: modo compatible
+// Funcionalidad (con credenciales)
 // ---------------------------------------------------------------------------
-async function runOpenMode(base, webhook) {
+async function runFunctional(base, webhook) {
   const call = api(base);
   const ticket = `TK-HARD-${Date.now()}`;
 
@@ -141,7 +147,7 @@ async function runOpenMode(base, webhook) {
   });
   check('link crea conversación', link.status === 201, link.body);
 
-  const convs = await call('GET', '/api/conversations');
+  const convs = await call('GET', '/api/conversations', { key: TICKETS_KEY });
   const leaked = JSON.stringify(convs.body).includes('secret_key');
   check('GET /api/conversations no expone apiKey de plataformas', convs.status === 200 && !leaked);
 
@@ -153,10 +159,10 @@ async function runOpenMode(base, webhook) {
   check('socket /client rechaza customerId con operador NoSQL', !injCust.ok, injCust.error);
   injCust.socket.close();
 
-  const redos = await call('GET', `/api/departments/${encodeURIComponent('(a+)+$')}/availability?date=2026-10-01`);
+  const redos = await call('GET', `/api/departments/${encodeURIComponent('(a+)+$')}/availability?date=2026-10-01`, { key: MARACAIBO_KEY });
   check('departmentId con regex malicioso → 404 (no se evalúa como patrón)', redos.status === 404, redos);
 
-  const badId = await call('GET', '/api/conversations/no-es-un-id/history');
+  const badId = await call('GET', '/api/conversations/no-es-un-id/history', { key: TICKETS_KEY });
   check('ID inválido → 400 sin filtrar detalles internos', badId.status === 400 && !/Cast|mongoose/i.test(badId.body?.error), badId.body);
 
   const upload = await call('POST', '/api/uploads/image', { headers: { 'Content-Type': 'multipart/form-data; boundary=x' } });
@@ -171,11 +177,12 @@ async function runOpenMode(base, webhook) {
   check('origen localhost real permitido', good.status === 200, good.status);
 
   console.log('\n📅 Citas');
-  const depts = await call('GET', '/api/departments');
+  const depts = await call('GET', '/api/departments', { key: MARACAIBO_KEY });
   const dir = depts.body.data.find((d) => d.code === 'DIR'); // capacidad 4
   const date = '2026-11-02';
   const slot = '09:00 - 10:00';
   const mkAppointment = (i, extra = {}) => call('POST', '/api/appointments', {
+    key: MARACAIBO_KEY,
     body: {
       departmentId: 'direccion',
       taxpayer: { name: `Contribuyente ${i}`, cedulaRif: `V-${1000 + i}`, email: `c${i}@x.com`, phone: '0414' },
@@ -186,26 +193,26 @@ async function runOpenMode(base, webhook) {
     }
   });
 
-  const platforms = await call('GET', '/api/conversations'); // solo para tener el platformId
+  const platforms = await call('GET', '/api/conversations', { key: TICKETS_KEY }); // solo para tener el platformId
   const platformId = platforms.body[0]?.platformId?._id;
   const first = await mkAppointment(0, { platformId });
   check('crear cita por slug', first.status === 201, first.body);
   for (let i = 1; i < dir.capacityPerHour; i++) await mkAppointment(i);
 
-  const avail = await call('GET', `/api/departments/direccion/availability?date=${date}`);
+  const avail = await call('GET', `/api/departments/direccion/availability?date=${date}`, { key: MARACAIBO_KEY });
   const slotInfo = avail.body?.data?.slots?.find((s) => s.slot === slot);
   check('disponibilidad por slug cuenta las reservas reales', slotInfo?.booked === dir.capacityPerHour && slotInfo.available === false, slotInfo);
 
   const over = await mkAppointment(99);
   check('sobre-agendar un horario lleno → 409', over.status === 409, over.body);
 
-  const badDate = await call('GET', '/api/departments/direccion/availability?date=mañana');
+  const badDate = await call('GET', '/api/departments/direccion/availability?date=mañana', { key: MARACAIBO_KEY });
   check('fecha inválida → 400', badDate.status === 400, badDate.body);
 
-  const badType = await call('PATCH', `/api/appointments/${first.body.data.id}/respond`, { body: { resolutionType: 'HACKEADO' } });
+  const badType = await call('PATCH', `/api/appointments/${first.body.data.id}/respond`, { key: TICKETS_KEY, body: { resolutionType: 'HACKEADO' } });
   check('resolutionType inválido → 400', badType.status === 400, badType.body);
 
-  const msgs = await call('GET', `/api/appointments/${first.body.data.id}/messages`);
+  const msgs = await call('GET', `/api/appointments/${first.body.data.id}/messages`, { key: TICKETS_KEY });
   check('mensajes de cita responde', msgs.status === 200 && Array.isArray(msgs.body.messages), msgs.body);
 
   // El ciudadano (sala = conversationId) recibe appointment_updated
@@ -216,14 +223,15 @@ async function runOpenMode(base, webhook) {
   const joined = await emitAck(citizen.socket, 'join_chat');
   check('ciudadano se une al chat de la cita', joined.success && String(joined.conversationId) === cita.conversationId, joined);
   const updates = collect(citizen.socket, 'appointment_updated');
-  await call('PATCH', `/api/appointments/${cita.id}/respond`, { body: { resolutionType: 'CONFIRMADA_PRESENCIAL', notes: 'ok' } });
+  await call('PATCH', `/api/appointments/${cita.id}/respond`, { key: TICKETS_KEY, body: { resolutionType: 'CONFIRMADA_PRESENCIAL', notes: 'ok' } });
   await wait(300);
   check('ciudadano recibe appointment_updated (bug room_ corregido)', updates.length === 1, updates.length);
   citizen.socket.close();
 
   console.log('\n💬 Tiempo real');
-  const agent = await connect(base, '/agent', {});
-  check('agente conecta (AUTH_ENFORCE=false)', agent.ok, agent.error);
+  // Como el panel en el navegador: token firmado, nunca la API Key.
+  const agent = await connect(base, '/agent', { token: agentToken() });
+  check('agente del panel conecta con token firmado', agent.ok, agent.error);
   const agentMsgs = collect(agent.socket, 'new_message');
   const agentPresence = collect(agent.socket, 'client_presence');
 
@@ -275,13 +283,13 @@ async function runOpenMode(base, webhook) {
 }
 
 // ---------------------------------------------------------------------------
-// Ronda 2: modo seguro
+// Seguridad (sin credenciales o con credenciales inválidas)
 // ---------------------------------------------------------------------------
-async function runStrictMode(base) {
+async function runSecurity(base) {
   const call = api(base);
   const ticket = `TK-STRICT-${Date.now()}`;
 
-  console.log('\n🛡️ AUTH_ENFORCE=true');
+  console.log('\n🛡️ Autenticación obligatoria');
   const noKeyAgent = await connect(base, '/agent', {});
   check('/agent sin key → rechazado', !noKeyAgent.ok, noKeyAgent.error);
   noKeyAgent.socket.close();
@@ -293,6 +301,19 @@ async function runStrictMode(base) {
   const okAgent = await connect(base, '/agent', { apiKey: TICKETS_KEY });
   check('/agent con key de Tickets → conecta', okAgent.ok, okAgent.error);
   okAgent.socket.close();
+
+  const forged = await connect(base, '/agent', { token: agentToken({ secret: 'otro-secreto' }) });
+  check('/agent con token firmado con otro secreto → rechazado', !forged.ok, forged.error);
+  forged.socket.close();
+
+  const expired = await connect(base, '/agent', { token: agentToken({ ttlSec: -60 }) });
+  check('/agent con token vencido → rechazado', !expired.ok, expired.error);
+  expired.socket.close();
+
+  const tampered = agentToken().replace(/^[^.]+/, Buffer.from(JSON.stringify({ sub: 'x', exp: 9999999999 })).toString('base64url'));
+  const tamperedConn = await connect(base, '/agent', { token: tampered });
+  check('/agent con token alterado → rechazado', !tamperedConn.ok, tamperedConn.error);
+  tamperedConn.socket.close();
 
   const r1 = await call('GET', '/api/conversations');
   const r2 = await call('GET', '/api/conversations', { key: MARACAIBO_KEY });
@@ -319,6 +340,22 @@ async function runStrictMode(base) {
   const joinOwner = await emitAck(owner.socket, 'join_chat');
   check('el dueño sí puede unirse', joinOwner.success === true, joinOwner);
   owner.socket.close();
+
+  // El panel enlaza con la cédula del ticket tal cual; la app la envía normalizada.
+  const ticketCedula = `TK-CED-${Date.now()}`;
+  await call('POST', '/api/integrations/conversations/link', {
+    key: TICKETS_KEY,
+    body: { ticketId: ticketCedula, customerId: 'v-12.345.678', customerName: 'Ciudadana' }
+  });
+  const app = await connect(base, '/client', { apiKey: MARACAIBO_KEY, customerId: 'V12345678', customerName: 'Ciudadana', ticketId: ticketCedula });
+  const joinApp = await emitAck(app.socket, 'join_chat');
+  check('app con cédula normalizada (V12345678) entra al ticket enlazado como "v-12.345.678"', joinApp.success === true, joinApp);
+  app.socket.close();
+
+  const otherCed = await connect(base, '/client', { apiKey: MARACAIBO_KEY, customerId: 'V87654321', customerName: 'Otro', ticketId: ticketCedula });
+  const joinOther = await emitAck(otherCed.socket, 'join_chat');
+  check('otra cédula no entra al ticket', joinOther.success === false, joinOther);
+  otherCed.socket.close();
 }
 
 async function main() {
@@ -326,6 +363,8 @@ async function main() {
   const webhook = await startWebhookStub();
   const baseEnv = {
     NODE_ENV: 'development',
+    CHAT_CORE_SKIP_DOTENV: 'true',
+    AGENT_TOKEN_SECRET,
     NOTIFICATIONS_API_URL: `http://127.0.0.1:${webhook.port}/notifications/ticket`,
     NOTIFICATIONS_API_KEY: TICKETS_KEY,
     MARACAIBO_API_KEY: MARACAIBO_KEY,
@@ -340,8 +379,8 @@ async function main() {
   };
 
   const rounds = [
-    { name: 'AUTH_ENFORCE=false', port: 4311, db: 'hard_open', env: { AUTH_ENFORCE: 'false' }, run: (b) => runOpenMode(b, webhook) },
-    { name: 'AUTH_ENFORCE=true', port: 4312, db: 'hard_strict', env: { AUTH_ENFORCE: 'true' }, run: runStrictMode }
+    { name: 'funcionalidad', port: 4311, db: 'hard_func', env: {}, run: (b) => runFunctional(b, webhook) },
+    { name: 'seguridad', port: 4312, db: 'hard_sec', env: {}, run: runSecurity }
   ];
 
   try {

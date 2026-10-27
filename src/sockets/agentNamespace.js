@@ -1,6 +1,6 @@
 /**
  * Namespace /agent — panel de agentes y jefes de departamento.
- * Autenticación con API Key de agente (obligatoria solo si AUTH_ENFORCE=true).
+ * Autenticación obligatoria: API Key de agente o token de agente firmado (AGENT_TOKEN_SECRET).
  */
 
 const Conversation = require('../models/Conversation');

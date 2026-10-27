@@ -9,3 +9,8 @@ PLAN*.md
 INTEGRACION*.md
 walkthrough.md
 implementation_plan.md
+demo-cliente-externo
+scripts
+seed.js
+*.code-workspace
+render.yaml
