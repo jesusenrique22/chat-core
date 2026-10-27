@@ -10,6 +10,7 @@ const {
 } = require('../lib/messageStore');
 const { validateMessagePayload } = require('../lib/messageHelpers');
 const { agentSocketAuth } = require('../lib/auth');
+const { registerAgentCallHandlers } = require('../lib/calls');
 const { AGENTS_DASHBOARD_ROOM, getDepartmentRoom } = require('../lib/socketRooms');
 const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('../lib/throttle');
 const { asString, asObjectId, safeAck } = require('../lib/validate');
@@ -29,6 +30,7 @@ function registerAgentNamespace(io) {
   agentNamespace.on('connection', (socket) => {
     socket.join(AGENTS_DASHBOARD_ROOM);
     logger.info('agent_connected', { authenticated: !!socket.agent });
+    registerAgentCallHandlers(socket, io);
 
     socket.on('agent_join', (data) => {
       const conversationId = asObjectId(data?.conversationId);

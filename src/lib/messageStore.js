@@ -135,6 +135,8 @@ async function recordMessage(
       customMessage = `Hey, tienes un mensaje en el ticket ${ticketId}: "${content}"`;
     } else if (messageType === 'image') {
       customMessage = `Hey, tienes una imagen nueva en el ticket ${ticketId}`;
+    } else if (messageType === 'audio') {
+      customMessage = `Hey, tienes una nota de voz nueva en el ticket ${ticketId}`;
     }
 
     logger.info('ticket_notify_queued', {
@@ -176,7 +178,7 @@ function parseHistoryQuery(query = {}) {
   if (query.senderType === 'customer' || query.senderType === 'agent') {
     filter.senderType = query.senderType;
   }
-  if (query.messageType === 'text' || query.messageType === 'image') {
+  if (['text', 'image', 'audio'].includes(query.messageType)) {
     filter.messageType = query.messageType;
   }
 
@@ -202,20 +204,22 @@ async function aggregateMessageStats(baseFilter) {
         fromCustomer: countIf({ $eq: ['$senderType', 'customer'] }),
         fromAgent: countIf({ $eq: ['$senderType', 'agent'] }),
         imageCount: countIf({ $eq: ['$messageType', 'image'] }),
+        audioCount: countIf({ $eq: ['$messageType', 'audio'] }),
         inbound: countIf(inboundExpr)
       }
     }
   ]);
 
   if (!row) {
-    return { total: 0, fromCustomer: 0, fromAgent: 0, textCount: 0, imageCount: 0, inbound: 0, outbound: 0 };
+    return { total: 0, fromCustomer: 0, fromAgent: 0, textCount: 0, imageCount: 0, audioCount: 0, inbound: 0, outbound: 0 };
   }
   return {
     total: row.total,
     fromCustomer: row.fromCustomer,
     fromAgent: row.fromAgent,
-    textCount: row.total - row.imageCount,
+    textCount: row.total - row.imageCount - row.audioCount,
     imageCount: row.imageCount,
+    audioCount: row.audioCount,
     inbound: row.inbound,
     outbound: row.total - row.inbound
   };

@@ -16,6 +16,7 @@ const {
 const { validateMessagePayload } = require('../lib/messageHelpers');
 const { isOriginAllowedForPlatform } = require('../lib/cors');
 const { findPlatformByApiKey, verifyClientToken } = require('../lib/auth');
+const { registerClientCallHandlers } = require('../lib/calls');
 const { AGENTS_DASHBOARD_ROOM } = require('../lib/socketRooms');
 const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('../lib/throttle');
 const { asString, safeAck } = require('../lib/validate');
@@ -81,6 +82,7 @@ function registerClientNamespace(io) {
       customerId: socket.customerId,
       platform: socket.platform.name
     });
+    registerClientCallHandlers(socket, io);
 
     socket.on('join_chat', async (dataOrCallback, maybeCallback) => {
       const callback = safeAck(typeof dataOrCallback === 'function' ? dataOrCallback : maybeCallback);

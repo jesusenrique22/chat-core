@@ -1,5 +1,5 @@
 /**
- * Modelo: Message — texto (emojis UTF-8) o imagen (URL pública en attachment, archivo en bucket).
+ * Modelo: Message — texto (emojis UTF-8), imagen o nota de voz (URL pública en attachment, archivo en bucket).
  */
 
 const mongoose = require('mongoose');
@@ -9,7 +9,9 @@ const attachmentSchema = new mongoose.Schema(
     url: { type: String, required: true },
     mimeType: { type: String, required: true },
     sizeBytes: { type: Number, default: 0 },
-    fileName: { type: String, default: '' }
+    fileName: { type: String, default: '' },
+    /** Solo notas de voz: duración en milisegundos (la informa quien graba). */
+    durationMs: { type: Number, default: 0 }
   },
   { _id: false }
 );
@@ -30,7 +32,7 @@ const messageSchema = new mongoose.Schema({
   },
   messageType: {
     type: String,
-    enum: ['text', 'image'],
+    enum: ['text', 'image', 'audio'],
     default: 'text'
   },
   content: {

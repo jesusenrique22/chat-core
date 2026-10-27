@@ -1,9 +1,12 @@
 const MAX_TEXT_LENGTH = 4000;
 const MAX_IMAGE_BYTES = Number(process.env.UPLOAD_MAX_BYTES) || 3 * 1024 * 1024;
+/** Notas de voz sin límite de duración: solo tope de tamaño (25 MB ≈ 50 min en AAC 64 kbps). */
+const MAX_AUDIO_BYTES = Number(process.env.UPLOAD_MAX_AUDIO_BYTES) || 25 * 1024 * 1024;
+const MESSAGE_TYPES = new Set(['text', 'image', 'audio']);
 const { rewritePublicUrl } = require('./publicUrl');
 
 function validateMessagePayload(data) {
-  const messageType = data?.messageType === 'image' ? 'image' : 'text';
+  const messageType = MESSAGE_TYPES.has(data?.messageType) ? data.messageType : 'text';
   const content = (data?.content || '').trim();
 
   if (messageType === 'text') {
@@ -17,6 +20,9 @@ function validateMessagePayload(data) {
   }
 
   const attachment = data?.attachment;
+  if (messageType === 'audio') {
+    return validateAudioPayload(content, attachment);
+  }
   if (!attachment?.url || typeof attachment.url !== 'string') {
     return { error: 'La imagen debe subirse primero (attachment.url)' };
   }
@@ -39,9 +45,36 @@ function validateMessagePayload(data) {
   };
 }
 
+function validateAudioPayload(content, attachment) {
+  if (!attachment?.url || typeof attachment.url !== 'string') {
+    return { error: 'La nota de voz debe subirse primero (attachment.url)' };
+  }
+  if (!attachment.mimeType || !String(attachment.mimeType).startsWith('audio/')) {
+    return { error: 'Solo se permiten archivos de audio' };
+  }
+  if (attachment.sizeBytes && attachment.sizeBytes > MAX_AUDIO_BYTES) {
+    return { error: 'La nota de voz supera el tamaño máximo permitido' };
+  }
+  const durationMs = Math.round(Number(attachment.durationMs));
+  return {
+    messageType: 'audio',
+    content: content.slice(0, MAX_TEXT_LENGTH),
+    attachment: {
+      url: attachment.url.trim(),
+      mimeType: attachment.mimeType,
+      sizeBytes: Number(attachment.sizeBytes) || 0,
+      fileName: (attachment.fileName || '').trim(),
+      durationMs: Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0
+    }
+  };
+}
+
 function getLastMessagePreview(messageType, content) {
   if (messageType === 'image') {
-    return content ? `📷 ${content}` : '📷 Imagen';
+    return content ? `Imagen: ${content}` : 'Imagen';
+  }
+  if (messageType === 'audio') {
+    return 'Nota de voz';
   }
   return content;
 }
@@ -76,6 +109,7 @@ function mapMessagesToData(messages) {
 module.exports = {
   MAX_TEXT_LENGTH,
   MAX_IMAGE_BYTES,
+  MAX_AUDIO_BYTES,
   validateMessagePayload,
   getLastMessagePreview,
   toMessageData,

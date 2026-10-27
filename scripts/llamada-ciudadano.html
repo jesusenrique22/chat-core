@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ciudadano de prueba · llamadas</title>
+<!--
+  Implementación de referencia del lado ciudadano (lo que debe hacer la app de Servicios Maracaibo).
+  Uso local:  cd chat-core/scripts && python3 -m http.server 5600  →  http://localhost:5600/llamada-ciudadano.html
+-->
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/dist/socket.io.min.js"></script>
+<style>
+  :root { color-scheme: light dark; --bg:#0f172a; --card:#1e293b; --fg:#f8fafc; --muted:#94a3b8; --ok:#22c55e; --bad:#ef4444; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--fg); display:grid; place-items:center; min-height:100vh; }
+  main { width:min(420px, calc(100vw - 32px)); background:var(--card); border-radius:18px; padding:20px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-top:10px; }
+  input { width:100%; box-sizing:border-box; padding:9px 10px; border-radius:10px; border:1px solid #334155; background:#0b1220; color:var(--fg); }
+  button { border:none; border-radius:12px; padding:12px 16px; font-weight:700; cursor:pointer; color:#fff; }
+  .row { display:flex; gap:10px; margin-top:14px; }
+  .row button { flex:1; }
+  #status { margin-top:14px; font-size:14px; color:var(--muted); }
+  #ring { display:none; text-align:center; padding:18px 0 4px; }
+  #ring h2 { margin:0 0 4px; }
+  #log { margin-top:14px; font:11px ui-monospace,monospace; color:var(--muted); max-height:180px; overflow:auto; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h3 style="margin:0">Ciudadano de prueba</h3>
+  <label>URL de chat-core</label><input id="url" value="http://localhost:4001">
+  <label>API key Servicios Maracaibo</label><input id="key" value="maracaibo_secret_key_2026">
+  <label>Cédula (customerId)</label><input id="cedula" value="V9900000">
+  <label>Nombre</label><input id="name" value="Ciudadano Prueba">
+  <label>ticketId (_id del ticket)</label><input id="ticket" placeholder="_id del ticket / denuncia">
+  <div class="row"><button id="connect" style="background:#2563eb">Conectar</button></div>
+
+  <div id="ring">
+    <h2 id="caller">—</h2>
+    <div id="ringtext" style="color:var(--muted)">te está llamando…</div>
+    <div class="row">
+      <button id="reject" style="background:var(--bad)">Rechazar</button>
+      <button id="accept" style="background:var(--ok)">Contestar</button>
+    </div>
+  </div>
+  <div class="row" id="incall" style="display:none">
+    <button id="mute" style="background:#475569">Silenciar</button>
+    <button id="hangup" style="background:var(--bad)">Colgar</button>
+  </div>
+  <div id="status">Desconectado</div>
+  <audio id="remote" autoplay playsinline></audio>
+  <div id="log"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const log = (...a) => { $('log').textContent = `${new Date().toLocaleTimeString()} ${a.join(' ')}\n` + $('log').textContent; };
+const status = (t) => { $('status').textContent = t; };
+
+let socket, pc, localStream, current = null, pending = [], timer;
+
+$('connect').onclick = () => {
+  socket?.disconnect();
+  socket = io(`${$('url').value}/client`, {
+    transports: ['websocket'],
+    auth: { apiKey: $('key').value, customerId: $('cedula').value, customerName: $('name').value, ticketId: $('ticket').value },
+  });
+  socket.on('connect', () => {
+    status('Conectado · esperando llamadas');
+    socket.emit('join_chat', (r) => log('join_chat', r?.success ? 'ok' : r?.error));
+    if (current?.active) socket.emit('call_resume', { callId: current.callId }, (r) => log('call_resume', r?.success));
+  });
+  socket.on('connect_error', (e) => status(`Error: ${e.message}`));
+
+  // 1) Suena
+  socket.on('call_incoming', (call) => {
+    if (current) return;
+    log('call_incoming', call.callId, call.callerName);
+    current = { callId: call.callId };
+    $('caller').textContent = call.callerName;
+    $('ringtext').textContent = 'te está llamando…';
+    $('ring').style.display = 'block';
+    status('Llamada entrante');
+  });
+  socket.on('call_answered_elsewhere', () => reset('Contestada en otro dispositivo'));
+  socket.on('call_ended', (e) => { if (e.callId === current?.callId) reset(`Llamada terminada (${e.status}${e.reason ? ` · ${e.reason}` : ''})`); });
+  socket.on('call_peer_disconnected', () => status('El funcionario perdió la conexión…'));
+
+  // 4) Señalización: llega la offer del panel → answer. Los candidates se aplican cuando hay remoteDescription.
+  socket.on('call_signal', async ({ callId, data }) => {
+    if (!pc || callId !== current?.callId) return;
+    if (data.type === 'offer') {
+      await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+      for (const c of pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('call_signal', { callId, data: { type: 'answer', sdp: answer.sdp } });
+      log('offer → answer');
+    } else if (data.type === 'candidate' && data.candidate) {
+      if (pc.remoteDescription) await pc.addIceCandidate(data.candidate).catch(() => {});
+      else pending.push(data.candidate);
+    }
+  });
+};
+
+// 2) Contestar: pedir micrófono, aceptar y preparar el RTCPeerConnection con los iceServers del ack.
+$('accept').onclick = async () => {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch { return status('Permiso de micrófono denegado'); }
+  socket.emit('call_accept', { callId: current.callId }, (res) => {
+    if (!res?.success) return reset(res?.error || 'No se pudo contestar');
+    current.active = true;
+    pc = new RTCPeerConnection({ iceServers: res.iceServers });
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+    pc.onicecandidate = (e) => e.candidate && socket.emit('call_signal', { callId: current.callId, data: { type: 'candidate', candidate: e.candidate.toJSON() } });
+    pc.ontrack = (e) => { $('remote').srcObject = e.streams[0]; };
+    pc.onconnectionstatechange = () => {
+      log('connectionState', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        const start = Date.now();
+        clearInterval(timer);
+        timer = setInterval(() => status(`En llamada · ${Math.floor((Date.now() - start) / 1000)} s`), 500);
+        pc.getStats().then((s) => s.forEach((r) => {
+          if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) {
+            const l = s.get(r.localCandidateId);
+            log('ruta:', l?.candidateType === 'relay' ? 'TURN (relay)' : `directa (${l?.candidateType})`);
+          }
+        }));
+      }
+    };
+    $('ring').style.display = 'none';
+    $('incall').style.display = 'flex';
+    status('Conectando audio…');
+  });
+};
+
+// 3) Rechazar
+$('reject').onclick = () => socket.emit('call_reject', { callId: current.callId }, () => reset('Rechazada'));
+
+// 5) Colgar
+$('hangup').onclick = () => socket.emit('call_end', { callId: current.callId }, () => reset('Colgaste'));
+$('mute').onclick = () => {
+  const track = localStream?.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  $('mute').textContent = track.enabled ? 'Silenciar' : 'Activar micrófono';
+};
+
+function reset(text) {
+  clearInterval(timer);
+  pc?.close(); pc = null;
+  localStream?.getTracks().forEach((t) => t.stop()); localStream = null;
+  current = null; pending = [];
+  $('ring').style.display = 'none';
+  $('incall').style.display = 'none';
+  $('mute').textContent = 'Silenciar';
+  status(text);
+  log(text);
+}
+</script>
+</body>
+</html>

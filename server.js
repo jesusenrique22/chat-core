@@ -20,6 +20,7 @@ initPublicBaseUrl(PORT);
 const Platform = require('./src/models/Platform');
 const Conversation = require('./src/models/Conversation');
 const { registerIntegrationRoutes } = require('./src/lib/integrations');
+const { registerCallRoutes } = require('./src/lib/calls');
 const { getConversationHistory } = require('./src/lib/messageStore');
 const {
   createCorsOriginHandler,
@@ -207,6 +208,7 @@ function configureExpress(expressApp, io, corsOriginHandler) {
   // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
   registerIntegrationRoutes(expressApp, io);
+  registerCallRoutes(expressApp, io);
   registerAppointmentRoutes(expressApp, io.of('/agent'), io.of('/client'));
 
   expressApp.use('/api', (_req, res) => {
