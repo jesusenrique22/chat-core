@@ -18,6 +18,16 @@ const TICKET_ID = 'TICKET-CALLS-1';
 const TICKET_OFFLINE = 'TICKET-CALLS-2';
 const PUSH_PORT = 4098;
 const PUSH_KEY = 'push-test-key';
+const AGENT_TOKEN_SECRET = 'test-agent-token-secret-calls';
+
+// El socket /agent siempre exige credencial: token firmado por el panel, como en producción.
+function agentAuth(sub = 'agente-1', name = 'Ana Agente') {
+  const payload = Buffer.from(
+    JSON.stringify({ sub, name, exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sig = require('crypto').createHmac('sha256', AGENT_TOKEN_SECRET).update(payload).digest('hex');
+  return { token: `${payload}.${sig}` };
+}
 
 // Servidor falso con el contrato de Servicios Maracaibo: POST /api/calls/push con x-internal-key.
 const pushes = [];
@@ -117,7 +127,7 @@ async function main() {
       CALL_DISCONNECT_GRACE_MS: '500',
       CALLS_PUSH_URL: `http://127.0.0.1:${PUSH_PORT}/api/calls/push`,
       CALLS_PUSH_KEY: PUSH_KEY,
-      AUTH_ENFORCE: 'false',
+      AGENT_TOKEN_SECRET,
       LOG_LEVEL: 'error'
     },
     stdio: ['ignore', 'ignore', 'inherit']
@@ -141,7 +151,7 @@ async function main() {
     const phone = await citizen();
     const tablet = await citizen();
     const stranger = await connect('/client', { apiKey: MARACAIBO_KEY, customerId: 'V2', customerName: 'Otro', ticketId: 'OTRO' });
-    const agent = await connect('/agent', {});
+    const agent = await connect('/agent', agentAuth());
     sockets.push(phone, tablet, stranger, agent);
     assert.ok((await emit(phone, 'join_chat')).success);
 
@@ -273,7 +283,7 @@ async function main() {
       key: TICKETS_KEY,
       body: { ticketId: TICKET_OFFLINE, customerId: 'V3', customerName: 'Sin App' }
     });
-    const agent2 = await connect('/agent', {});
+    const agent2 = await connect('/agent', agentAuth('agente-2', 'Beto Agente'));
     sockets.push(agent2);
 
     const offline = await startCall(TICKET_OFFLINE);
