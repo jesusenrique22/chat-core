@@ -66,6 +66,7 @@ async function recordMessage(
     content,
     attachment,
     senderName = '',
+    senderAvatarUrl = '',
     deliveryChannel
   },
   io
@@ -83,6 +84,7 @@ async function recordMessage(
       content: content || '',
       attachment: attachment || null,
       senderName: senderName || '',
+      senderAvatarUrl: senderAvatarUrl || '',
       deliveryChannel: deliveryChannel || DELIVERY_CHANNELS.SOCKET_CLIENT,
       externalTicketId: conversation.externalTicketId || '',
       customerId: conversation.customerId,
@@ -137,6 +139,8 @@ async function recordMessage(
       customMessage = `Hey, tienes una imagen nueva en el ticket ${ticketId}`;
     } else if (messageType === 'audio') {
       customMessage = `Hey, tienes una nota de voz nueva en el ticket ${ticketId}`;
+    } else if (messageType === 'file') {
+      customMessage = `Hey, tienes un documento nuevo en el ticket ${ticketId}`;
     }
 
     logger.info('ticket_notify_queued', {
@@ -178,7 +182,7 @@ function parseHistoryQuery(query = {}) {
   if (query.senderType === 'customer' || query.senderType === 'agent') {
     filter.senderType = query.senderType;
   }
-  if (['text', 'image', 'audio'].includes(query.messageType)) {
+  if (['text', 'image', 'audio', 'file'].includes(query.messageType)) {
     filter.messageType = query.messageType;
   }
 
@@ -205,21 +209,23 @@ async function aggregateMessageStats(baseFilter) {
         fromAgent: countIf({ $eq: ['$senderType', 'agent'] }),
         imageCount: countIf({ $eq: ['$messageType', 'image'] }),
         audioCount: countIf({ $eq: ['$messageType', 'audio'] }),
+        fileCount: countIf({ $eq: ['$messageType', 'file'] }),
         inbound: countIf(inboundExpr)
       }
     }
   ]);
 
   if (!row) {
-    return { total: 0, fromCustomer: 0, fromAgent: 0, textCount: 0, imageCount: 0, audioCount: 0, inbound: 0, outbound: 0 };
+    return { total: 0, fromCustomer: 0, fromAgent: 0, textCount: 0, imageCount: 0, audioCount: 0, fileCount: 0, inbound: 0, outbound: 0 };
   }
   return {
     total: row.total,
     fromCustomer: row.fromCustomer,
     fromAgent: row.fromAgent,
-    textCount: row.total - row.imageCount - row.audioCount,
+    textCount: row.total - row.imageCount - row.audioCount - row.fileCount,
     imageCount: row.imageCount,
     audioCount: row.audioCount,
+    fileCount: row.fileCount,
     inbound: row.inbound,
     outbound: row.total - row.inbound
   };
