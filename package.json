@@ -13,7 +13,8 @@
     "test:appointments": "node scripts/test-appointment-flow.js",
     "test:integration": "node scripts/test-integration.js",
     "seed": "node seed.js",
-    "test:hardening": "node scripts/test-hardening.js"
+    "test:hardening": "node scripts/test-hardening.js",
+    "test:ticket-gateway": "node scripts/test-ticket-gateway.js"
   },
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",

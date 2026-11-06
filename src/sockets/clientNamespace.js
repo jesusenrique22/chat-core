@@ -3,7 +3,7 @@
  */
 
 const Conversation = require('../models/Conversation');
-const { resolveConversationForClient } = require('../lib/integrations');
+const { resolveConversationForClient, reopenConversationIfAllowed } = require('../lib/integrations');
 const {
   DELIVERY_CHANNELS,
   JOIN_CHAT_MESSAGE_LIMIT,
@@ -17,11 +17,13 @@ const { validateMessagePayload } = require('../lib/messageHelpers');
 const { isOriginAllowedForPlatform } = require('../lib/cors');
 const { findPlatformByApiKey, verifyClientToken } = require('../lib/auth');
 const { registerClientCallHandlers } = require('../lib/calls');
-const { AGENTS_DASHBOARD_ROOM } = require('../lib/socketRooms');
+const { AGENTS_DASHBOARD_ROOM, getCitizenRoom } = require('../lib/socketRooms');
 const { shouldThrottleSocketEvent, shouldRateLimitSocketEvent } = require('../lib/throttle');
 const { asString, safeAck } = require('../lib/validate');
 const { publicMessage } = require('../lib/errors');
 const logger = require('../lib/logger');
+const { traceSocketAuth } = require('../lib/requestLog');
+const { isSessionToken, resolveCitizen } = require('../lib/citizenAuth');
 
 const SEND_MESSAGE_MAX_PER_MIN = Number(process.env.SEND_MESSAGE_MAX_PER_MIN) || 10;
 
@@ -33,18 +35,20 @@ function handshakeField(socket, key) {
 
 async function authenticateClient(socket, next) {
   const apiKey = asString(handshakeField(socket, 'apiKey'), { max: 512 });
-  const customerId = asString(handshakeField(socket, 'customerId'), { max: 128 });
-  const customerName = asString(handshakeField(socket, 'customerName'), { max: 200 });
+  let customerId = asString(handshakeField(socket, 'customerId'), { max: 128 });
+  let customerName = asString(handshakeField(socket, 'customerName'), { max: 200 });
   const ticketId = asString(handshakeField(socket, 'ticketId'), { max: 128 });
+  const token = handshakeField(socket, 'token');
+  const hasSession = isSessionToken(token);
   const origin = socket.handshake.headers.origin;
 
   if (!apiKey) {
     return next(new Error('Autenticación fallida: API Key requerida'));
   }
-  if (!customerId || !customerName) {
+  if (!hasSession && (!customerId || !customerName)) {
     return next(new Error('Autenticación fallida: Datos de cliente incompletos'));
   }
-  if (!verifyClientToken(customerId, ticketId, handshakeField(socket, 'token'))) {
+  if (!hasSession && !verifyClientToken(customerId, ticketId, token)) {
     return next(new Error('Autenticación fallida: token de cliente inválido'));
   }
 
@@ -52,6 +56,16 @@ async function authenticateClient(socket, next) {
     const platform = await findPlatformByApiKey(apiKey);
     if (!platform) {
       return next(new Error('Autenticación fallida: API Key no autorizada'));
+    }
+
+    // Con sesión de SM la identidad la da SM: se ignora el customerId que envíe la app.
+    if (hasSession) {
+      const citizen = await resolveCitizen(token);
+      if (!citizen) {
+        return next(new Error('Autenticación fallida: token de cliente inválido'));
+      }
+      customerId = citizen.cedula;
+      customerName = citizen.name || customerName || 'Ciudadano';
     }
 
     // Validar origen según plataforma + reglas globales (VPN, .env)
@@ -75,7 +89,7 @@ function registerClientNamespace(io) {
   const clientNamespace = io.of('/client');
   const agentNamespace = io.of('/agent');
 
-  clientNamespace.use(authenticateClient);
+  clientNamespace.use(traceSocketAuth(authenticateClient));
 
   clientNamespace.on('connection', (socket) => {
     logger.info('client_connected', {
@@ -83,6 +97,7 @@ function registerClientNamespace(io) {
       platform: socket.platform.name
     });
     registerClientCallHandlers(socket, io);
+    socket.join(getCitizenRoom(socket.customerId));
 
     socket.on('join_chat', async (dataOrCallback, maybeCallback) => {
       const callback = safeAck(typeof dataOrCallback === 'function' ? dataOrCallback : maybeCallback);
@@ -104,6 +119,7 @@ function registerClientNamespace(io) {
           success: true,
           conversationId: conversation._id,
           externalTicketId: conversation.externalTicketId || null,
+          conversationStatus: conversation.status,
           messages: mapped,
           hasMore: mapped.length >= JOIN_CHAT_MESSAGE_LIMIT
         });
@@ -179,6 +195,12 @@ function registerClientNamespace(io) {
         const conversationId = socket.conversationId;
         if (!conversationId) {
           return ack({ success: false, error: 'No se ha unido a un chat activo. Ejecute join_chat primero.' });
+        }
+
+        // El socket sigue en la sala aunque el chat se cierre mientras lo tiene abierto.
+        const conversation = await Conversation.findById(conversationId);
+        if (!conversation || !(await reopenConversationIfAllowed(conversation))) {
+          return ack({ success: false, code: 'CONVERSATION_CLOSED', error: 'Este caso está cerrado y ya no admite mensajes.' });
         }
 
         const result = await recordMessage(
