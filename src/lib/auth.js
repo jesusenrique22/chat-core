@@ -12,7 +12,7 @@
 
 const crypto = require('crypto');
 const Platform = require('../models/Platform');
-const { asString } = require('./validate');
+const { asString, normalizeCustomerId } = require('./validate');
 const { unauthorized, forbidden } = require('./errors');
 const logger = require('./logger');
 
@@ -219,6 +219,41 @@ async function agentSocketAuth(socket, next) {
   }
 }
 
+/**
+ * Token de ciudadano: mismo formato que el de agente, payload = { sub: cédula, name, exp }.
+ * Lo firma el backend de Servicios Maracaibo con CITIZEN_TOKEN_SECRET después de autenticar al
+ * ciudadano. La API Key de Maracaibo es pública (va en la app): no prueba quién es el ciudadano.
+ */
+function signCitizenToken({ cedula, name = '' }, ttlSec = 60 * 60) {
+  const secret = process.env.CITIZEN_TOKEN_SECRET || '';
+  if (!secret) throw new Error('CITIZEN_TOKEN_SECRET no configurado');
+  const payload = Buffer.from(
+    JSON.stringify({ sub: String(cedula), name: String(name), exp: Math.floor(Date.now() / 1000) + ttlSec })
+  ).toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+/** Devuelve { cedula, name } si el token es válido y no venció; si no, null. */
+function verifyCitizenToken(rawToken) {
+  const secret = process.env.CITIZEN_TOKEN_SECRET || '';
+  const token = asString(rawToken, { max: 2048 });
+  if (!secret || !token) return null;
+
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  if (!safeEqual(sig, expected)) return null;
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data?.sub || !Number.isFinite(data.exp) || data.exp * 1000 < Date.now()) return null;
+    return { cedula: String(data.sub), name: asString(data.name, { max: 200 }) || '' };
+  } catch {
+    return null;
+  }
+}
+
 /** Firma esperada para el token de cliente. Útil para que el backend de Maracaibo la genere. */
 function signClientToken(customerId, ticketId = '') {
   return crypto
@@ -227,12 +262,17 @@ function signClientToken(customerId, ticketId = '') {
     .digest('hex');
 }
 
-/** true si no hay CLIENT_TOKEN_SECRET configurado o si el token es válido. */
+/**
+ * true si no hay CLIENT_TOKEN_SECRET configurado, si el HMAC es válido o si es un token de
+ * ciudadano de esa misma cédula (así la app usa una sola credencial para REST y socket).
+ */
 function verifyClientToken(customerId, ticketId, token) {
   if (!process.env.CLIENT_TOKEN_SECRET) return true;
-  const provided = asString(token, { max: 256 });
+  const provided = asString(token, { max: 2048 });
   if (!provided) return false;
-  return safeEqual(provided, signClientToken(customerId, ticketId));
+  if (safeEqual(provided, signClientToken(customerId, ticketId))) return true;
+  const citizen = verifyCitizenToken(provided);
+  return !!citizen && normalizeCustomerId(citizen.cedula) === normalizeCustomerId(customerId);
 }
 
 module.exports = {
@@ -248,6 +288,8 @@ module.exports = {
   agentSocketAuth,
   signAgentToken,
   verifyAgentToken,
+  signCitizenToken,
+  verifyCitizenToken,
   signClientToken,
   verifyClientToken
 };

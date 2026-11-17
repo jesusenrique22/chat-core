@@ -1,5 +1,5 @@
 /**
- * Modelo: Message — texto (emojis UTF-8), imagen o nota de voz (URL pública en attachment, archivo en bucket).
+ * Modelo: Message — texto (emojis UTF-8), imagen, nota de voz o PDF (URL pública en attachment, archivo en bucket).
  */
 
 const mongoose = require('mongoose');
@@ -32,7 +32,7 @@ const messageSchema = new mongoose.Schema({
   },
   messageType: {
     type: String,
-    enum: ['text', 'image', 'audio'],
+    enum: ['text', 'image', 'audio', 'file'],
     default: 'text'
   },
   content: {
@@ -46,6 +46,12 @@ const messageSchema = new mongoose.Schema({
     default: null
   },
   senderName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  /** Foto del agente al enviar (URL pública en el bucket); vacía si no tiene. */
+  senderAvatarUrl: {
     type: String,
     trim: true,
     default: ''

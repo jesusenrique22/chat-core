@@ -1,11 +1,11 @@
 /**
- * Subida de imágenes y notas de voz → bucket remoto (api-bucket).
+ * Subida de imágenes, notas de voz y PDF → bucket remoto (api-bucket).
  * El conector no guarda archivos en disco; MongoDB solo almacena la URL pública.
  */
 
 const multer = require('multer');
 const { authenticateRequest } = require('./auth');
-const { MAX_IMAGE_BYTES, MAX_AUDIO_BYTES } = require('./messageHelpers');
+const { MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, MAX_FILE_BYTES } = require('./messageHelpers');
 const {
   BUCKET_UPLOAD_URL,
   BUCKET_API_KEY,
@@ -76,6 +76,23 @@ const upload = multer({
     cb(null, true);
   }
 });
+
+const fileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_BYTES, files: 1, fields: 10, parts: 12 },
+  fileFilter(_req, file, cb) {
+    // Algunos clientes (Flutter) envían octet-stream: el tipo real se verifica por la firma.
+    if (file.mimetype !== 'application/pdf' && file.mimetype !== 'application/octet-stream') {
+      return cb(new Error('Tipo de archivo no permitido. Solo se aceptan documentos PDF.'));
+    }
+    cb(null, true);
+  }
+});
+
+/** Firma binaria de un PDF: el mimetype del cliente no es confiable. */
+function isPdf(buffer) {
+  return Boolean(buffer) && buffer.length > 5 && buffer.subarray(0, 5).toString('ascii') === '%PDF-';
+}
 
 /**
  * Reenvía el archivo al bucket y devuelve metadatos públicos.
@@ -229,6 +246,54 @@ function registerUploadRoutes(expressApp) {
         });
       } catch (uploadErr) {
         logger.error('audio_upload_failed', { error: uploadErr.message, status: uploadErr.status });
+        const status = uploadErr.status || 500;
+        res.status(status).json({ error: status >= 500 && !uploadErr.status ? 'Error interno del servidor' : uploadErr.message });
+      }
+    });
+  });
+
+  // Documentos PDF: mismo flujo (auth → multer → firma → bucket).
+  expressApp.post('/api/uploads/file', async (req, res) => {
+    try {
+      await authenticateRequest(req);
+    } catch (authErr) {
+      return res.status(authErr.status || 401).json({ success: false, error: authErr.message });
+    }
+
+    fileUpload.single('file')(req, res, async (err) => {
+      if (err) {
+        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({
+            error: `Documento demasiado grande (máx ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB)`
+          });
+        }
+        return res.status(400).json({ error: err.message });
+      }
+
+      try {
+        if (!req.file?.buffer) {
+          return res.status(400).json({ error: 'Campo "file" requerido (multipart/form-data)' });
+        }
+        if (!isPdf(req.file.buffer)) {
+          return res.status(400).json({ error: 'El archivo no es un PDF válido.' });
+        }
+
+        const base = String(req.file.originalname || 'documento').replace(/\.pdf$/i, '');
+        const result = await uploadBufferToBucket(req.file.buffer, {
+          originalName: `${base}.pdf`,
+          mimeType: 'application/pdf'
+        });
+
+        res.status(201).json({
+          success: true,
+          url: result.url,
+          key: result.key,
+          mimeType: 'application/pdf',
+          sizeBytes: result.sizeBytes,
+          fileName: result.fileName
+        });
+      } catch (uploadErr) {
+        logger.error('file_upload_failed', { error: uploadErr.message, status: uploadErr.status });
         const status = uploadErr.status || 500;
         res.status(status).json({ error: status >= 500 && !uploadErr.status ? 'Error interno del servidor' : uploadErr.message });
       }

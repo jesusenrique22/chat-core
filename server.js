@@ -36,7 +36,9 @@ const { requireAuth, invalidatePlatformCache } = require('./src/lib/auth');
 const { clampInt, asDate } = require('./src/lib/validate');
 const { errorMiddleware } = require('./src/lib/errors');
 const { startWebhookWorker, stopWebhookWorker } = require('./src/lib/webhooks');
+const { registerTicketGatewayRoutes } = require('./src/lib/ticketGateway');
 const { attachRedisAdapter } = require('./src/lib/socketAdapter');
+const { attachRequestLog } = require('./src/lib/requestLog');
 const { registerClientNamespace } = require('./src/sockets/clientNamespace');
 const { registerAgentNamespace } = require('./src/sockets/agentNamespace');
 
@@ -208,6 +210,7 @@ function configureExpress(expressApp, io, corsOriginHandler) {
   // Subida de imágenes → bucket remoto (MongoDB solo guarda la URL)
   registerUploadRoutes(expressApp);
   registerIntegrationRoutes(expressApp, io);
+  registerTicketGatewayRoutes(expressApp, io);
   registerCallRoutes(expressApp, io);
   registerAppointmentRoutes(expressApp, io.of('/agent'), io.of('/client'));
 
@@ -251,6 +254,7 @@ async function bootstrap() {
 
   registerClientNamespace(io);
   registerAgentNamespace(io);
+  attachRequestLog(expressApp, io);
   configureExpress(expressApp, io, corsOriginHandler);
 
   await new Promise((resolve, reject) => {

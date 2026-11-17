@@ -31,13 +31,18 @@ Health: `GET /api/integrations/health`
 
 ## Flujo completo
 
+Chat-core es la **única puerta de la app**. El Sistema de Tickets sigue siendo el dueño de los tickets.
+
 ```
-1. Usuario en App → Centro de Ayuda → backend Maracaibo crea ticket (en su servidor)
-2. Backend Maracaibo → POST /api/integrations/conversations/link  (ticketId + userId)
-3. App abre chat → Socket /client con ticketId en auth
+1. Backend Maracaibo autentica al ciudadano y le entrega un token de ciudadano
+2. App → POST /api/integrations/tickets → chat-core crea el ticket en Tickets y enlaza el chat
+3. App abre chat → Socket /client con el _id del ticket en auth
 4. Agente en Sistema de Tickets responde → POST /api/integrations/messages
 5. Conector → Socket new_message → App del ciudadano
+6. Cambia el status en Tickets → Socket ticket_status_changed → App del ciudadano
 ```
+
+Ver [Tickets del ciudadano](#tickets-del-ciudadano-app--chat-core).
 
 ---
 
@@ -91,11 +96,14 @@ curl -X POST http://localhost:4000/api/integrations/messages \
   -d '{
     "ticketId": "TEST-001",
     "content": "Hola, estamos revisando su caso.",
-    "agentName": "María López"
+    "agentName": "María López",
+    "agentAvatarUrl": "https://bucket.example/ticket_chat/maria.png"
   }'
 ```
 
 El mensaje llega en tiempo real a quien tenga abierto el chat con el mismo `ticketId` / `customerId`.
+
+`new_message` y el historial traen `senderName` y `senderAvatarUrl`. La foto es opcional y solo se acepta `https`: si el agente no tiene, `senderAvatarUrl` llega vacío y la app debe mostrar sus iniciales o un icono. Los mensajes anteriores a este cambio tampoco la traen. En el panel, la foto sale de `users.avatar_url` del agente autenticado.
 
 ### 3. Ciudadano → mensaje por REST (opcional, además del socket)
 
@@ -177,6 +185,90 @@ socket.emit("send_message", {
   }
 });
 ```
+
+---
+
+## Tickets del ciudadano (App → chat-core)
+
+Reemplazan a `/api/v1/*` del Sistema de Tickets. **La app ya no necesita la palabra secreta ni el
+token PASETO.** Todas las rutas exigen estos dos headers:
+
+```
+X-Api-Key: <API key de Servicios Maracaibo>
+Authorization: Bearer <accessToken del login de Servicios Maracaibo>
+```
+
+| Método y ruta | Cuerpo | Qué hace |
+|---|---|---|
+| `POST /api/integrations/tickets` | `title`, `description` y `location: { lat, lng, address? }` (obligatorios), `priority`, `problemType`, `customer_email`. Denuncia: `kind`, `description` y `location` (obligatorios), `category`, `institutionCode`, `citizen`, `anonymous` | Crea el ticket y enlaza el chat. Responde `201 { success, data, conversationId }` |
+| `GET /api/integrations/tickets` | | Sus tickets: `{ success, count, data }` |
+| `GET /api/integrations/tickets/:id` | | Uno de sus tickets, con `assigned_to_avatar_url`: la foto del agente asignado, vacía si no tiene. Si es de otro: `404` |
+| `PATCH /api/integrations/tickets/:id/status` | `status`: `ABIERTO`, `EN_PROGRESO`, `RESUELTO` o `CERRADO`. Opcionales: `closeReasonCategory`, `closeReasonDetail` | Cambia el status. Las denuncias responden `409` |
+
+- `data` tiene la misma forma que en `/api/v1/tickets`, y `status` es la etiqueta pública (`"Caso en progreso"`).
+- La cédula **sale de la sesión**: si llega en el cuerpo o en la URL, se ignora.
+- Usa `data._id` como `ticketId` del socket.
+- `401` = sesión inválida o vencida (renovarla con `refreshToken` y reintentar). `503` = no se pudo validar la sesión con Servicios Maracaibo (reintentar). `502`/`504` = Tickets no responde (reintentar).
+
+### Sesión del ciudadano
+
+La app envía el `accessToken` que ya obtiene en el login de Servicios Maracaibo, sin cambios en su
+backend. Ese token está cifrado con una clave de ellos, así que chat-core consulta `SM_AUTH_ME_URL`
+(`GET /api/auth/me`) y toma de la respuesta `dni` y `name`. Guarda el resultado 5 minutos
+(`SM_AUTH_CACHE_MS`): una sesión revocada puede seguir sirviendo aquí durante ese tiempo.
+
+En el socket `/client` va como `auth.token`. Con esa sesión, `customerId` y `customerName` no hacen
+falta y, si llegan, se ignoran.
+
+### Token firmado (alternativa para pruebas)
+
+Sin `SM_AUTH_ME_URL`, o en el entorno de pruebas, también se acepta un token firmado con
+`CITIZEN_TOKEN_SECRET`. Solo existe si se configura ese secreto, que vive únicamente en servidores:
+
+```javascript
+const crypto = require('crypto');
+
+function citizenToken(cedula, name, ttlSec = 3600) {
+  const payload = Buffer.from(JSON.stringify({
+    sub: cedula,
+    name,
+    exp: Math.floor(Date.now() / 1000) + ttlSec
+  })).toString('base64url');
+  const sig = crypto.createHmac('sha256', process.env.CITIZEN_TOKEN_SECRET).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+```
+
+Este token sirve como `auth.token` del socket `/client`, junto con `customerId` y `customerName`.
+
+### Status en tiempo real
+
+Cualquier socket `/client` del ciudadano recibe este evento, aunque tenga otro chat abierto:
+
+```javascript
+socket.on('ticket_status_changed', ({ ticketId, status, closed, changedAt }) => {
+  // status: "Caso en progreso"; closed: true solo si el ticket quedó CERRADO
+});
+```
+
+Si el socket estaba desconectado el aviso no se reenvía: **al reconectar, la app debe volver a
+consultar** `GET /api/integrations/tickets`.
+
+### Chat de un caso cerrado
+
+| Status del ticket | Chat |
+|---|---|
+| `RESUELTO` | Se cierra (`conversation_closed`). Si el ciudadano responde, se reabre. |
+| `CERRADO` | Se cierra y no se reabre. `join_chat` devuelve el historial con `conversationStatus: "closed"`; `send_message` responde `{ success: false, code: "CONVERSATION_CLOSED" }`. |
+
+Si Tickets no responde al ir a reabrir, el chat sigue cerrado hasta que vuelva.
+
+### Migración
+
+1. Desplegar **primero chat-core** con `SM_AUTH_ME_URL` y después Tickets.
+2. Probar con un usuario real de prueba de Servicios Maracaibo.
+3. Publicar la app usando estas rutas, con su `accessToken`, y escuchando `ticket_status_changed`.
+4. Cuando ya nadie use la versión anterior: `API_V1_DISABLED=true` en Tickets, quitar `API_SECRET_KEY` y activar `CLIENT_TOKEN_SECRET` en chat-core para exigir el token también en el socket.
 
 ---
 
@@ -269,6 +361,34 @@ Por REST (sistema de tickets → ciudadano): `POST /api/integrations/messages` c
 `attachment.durationMs`; la vista previa de la conversación es `Nota de voz`.
 
 Pruebas: `node scripts/test-audio.js`.
+
+## Documentos PDF (REST y Socket.io)
+
+Mismo flujo: primero se sube el archivo y luego se envía el mensaje con la URL. Solo PDF, hasta
+**10 MB** (`UPLOAD_MAX_FILE_BYTES`). El tipo se valida por la firma del archivo.
+
+**1) Subir** (`multipart/form-data`, campo `file`):
+
+```bash
+curl -X POST http://localhost:4000/api/uploads/file \
+  -H "X-Api-Key: maracaibo_secret_key_2026" \
+  -F "file=@oficio.pdf;type=application/pdf"
+# → 201 { "success": true, "url": "https://...pdf", "mimeType": "application/pdf", "sizeBytes": 123456, "fileName": "oficio.pdf" }
+```
+
+**2) Enviar** el mensaje (`messageType: "file"`):
+
+```javascript
+socket.emit("send_message", {
+  messageType: "file",
+  content: "",
+  attachment: { url, mimeType: "application/pdf", sizeBytes, fileName: "oficio.pdf" }
+}, (res) => {});
+```
+
+Por REST (sistema de tickets → ciudadano): `POST /api/integrations/messages` con el mismo
+`messageType` y `attachment`. La vista previa de la conversación es `Documento`. El archivo queda
+en una URL pública: no enviar por aquí documentos que no deban ser accesibles con el enlace.
 
 ## Integración en Sistema de Tickets
 

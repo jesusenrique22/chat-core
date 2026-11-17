@@ -23,6 +23,7 @@ const { asString, clampInt, normalizeCustomerId } = require('./validate');
 const { badRequest, forbidden, notFound } = require('./errors');
 const { AGENTS_DASHBOARD_ROOM } = require('./socketRooms');
 const { getUptimeSec, getStartedAtIso } = require('./runtime');
+const { isTicketLocked } = require('./ticketsClient');
 const logger = require('./logger');
 
 const MONGO_STATES = {
@@ -121,7 +122,8 @@ async function linkConversation({
     }).sort({ updatedAt: -1 });
 
     if (closed) {
-      closed.status = 'active';
+      // Abrir un ticket CERRADO en el panel enlaza su chat: se ve el historial, pero no se reabre.
+      if (!(await isTicketLocked(ticketIdStr))) closed.status = 'active';
       closed.customerId = customerIdStr;
       closed.customerName = customerNameStr;
       closed.sourceChannel = channel;
@@ -161,7 +163,22 @@ function assertCustomerOwnsConversation(conversation, socket) {
 }
 
 /**
+ * Un ciudadano puede retomar un chat cerrado (p. ej. de un caso resuelto) salvo que su ticket esté
+ * CERRADO. Devuelve true si la conversación queda activa.
+ */
+async function reopenConversationIfAllowed(conversation) {
+  if (conversation.status === 'active') return true;
+  if (conversation.externalTicketId && (await isTicketLocked(conversation.externalTicketId))) {
+    return false;
+  }
+  conversation.status = 'active';
+  await conversation.save();
+  return true;
+}
+
+/**
  * Resuelve conversación para join_chat (socket cliente).
+ * Si el ticket está CERRADO devuelve la conversación cerrada: se puede leer, no escribir.
  */
 async function resolveConversationForClient(socket, ticketIdFromAuth) {
   const maracaiboPlatform = isMaracaiboPlatform(socket.platform)
@@ -191,7 +208,7 @@ async function resolveConversationForClient(socket, ticketIdFromAuth) {
     }).sort({ updatedAt: -1 });
     if (closedByTicket) {
       assertCustomerOwnsConversation(closedByTicket, socket);
-      closedByTicket.status = 'active';
+      await reopenConversationIfAllowed(closedByTicket);
       closedByTicket.customerId = socket.customerId;
       closedByTicket.customerName = socket.customerName;
       await closedByTicket.save();
@@ -265,8 +282,19 @@ async function findActiveConversationByTicketId(ticketId) {
 /**
  * Guarda mensaje del agente (sistema de tickets) y lo entrega al cliente Maracaibo.
  */
+/** La app muestra esta URL como imagen: solo se acepta https; cualquier otra cosa queda sin foto. */
+function safeAvatarUrl(raw) {
+  const value = asString(raw, { max: 2048 });
+  if (!value) return '';
+  try {
+    return new URL(value).protocol === 'https:' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
 async function deliverAgentMessage(
-  { ticketId, content, agentName, messageType, attachment },
+  { ticketId, content, agentName, agentAvatarUrl, messageType, attachment },
   io
 ) {
   const conversation = await findActiveConversationByTicketId(ticketId);
@@ -283,6 +311,7 @@ async function deliverAgentMessage(
       content: payload.content,
       attachment: payload.attachment,
       senderName: asString(agentName, { max: 120 }) || 'Agente de soporte',
+      senderAvatarUrl: safeAvatarUrl(agentAvatarUrl),
       deliveryChannel: DELIVERY_CHANNELS.REST_TICKETS
     },
     io
@@ -378,7 +407,8 @@ function registerIntegrationRoutes(expressApp, io) {
       conversationId: conversation._id,
       externalTicketId: conversation.externalTicketId,
       customerId: conversation.customerId,
-      customerName: conversation.customerName
+      customerName: conversation.customerName,
+      status: conversation.status
     });
   });
 
@@ -391,13 +421,13 @@ function registerIntegrationRoutes(expressApp, io) {
       });
     }
 
-    const { ticketId, content, agentName, messageType, attachment } = req.body || {};
+    const { ticketId, content, agentName, agentAvatarUrl, messageType, attachment } = req.body || {};
     if (!asString(ticketId, { max: 128 })) {
       return res.status(400).json({ error: 'ticketId es obligatorio' });
     }
 
     const result = await deliverAgentMessage(
-      { ticketId, content, agentName, messageType, attachment },
+      { ticketId, content, agentName, agentAvatarUrl, messageType, attachment },
       io
     );
 
@@ -547,6 +577,7 @@ module.exports = {
   authenticateRequest,
   linkConversation,
   resolveConversationForClient,
+  reopenConversationIfAllowed,
   deliverAgentMessage,
   deliverCustomerMessage,
   closeConversationByTicketId,
